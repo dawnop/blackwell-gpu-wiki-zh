@@ -1,0 +1,18 @@
+# 英文原文站点：docs 来自 main 分支（由 build-all.sh 导出到 en-src/），挂在 /en/ 下。
+INHERIT: en-src/mkdocs.yml
+docs_dir: en-src/docs
+site_dir: site/en
+site_url: https://dawnop.github.io/blackwell-gpu-wiki-zh/en/
+repo_url: https://github.com/0xSero/blackwell-gpu-wiki
+repo_name: 0xSero/blackwell-gpu-wiki
+edit_uri: edit/main/docs/
+extra:
+  alternate:
+    - name: 中文
+      link: /blackwell-gpu-wiki-zh/
+      lang: zh
+    - name: English
+      link: /blackwell-gpu-wiki-zh/en/
+      lang: en
+extra_javascript:
+  - javascripts/lang-switch.js

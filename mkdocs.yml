@@ -88,6 +88,13 @@ plugins:
 
 
 extra:
+  alternate:
+    - name: 中文
+      link: /blackwell-gpu-wiki-zh/
+      lang: zh
+    - name: English
+      link: /blackwell-gpu-wiki-zh/en/
+      lang: en
   social:
     - icon: fontawesome/brands/github
       link: https://github.com/dawnop/blackwell-gpu-wiki-zh
@@ -95,6 +102,9 @@ extra:
 
 extra_css:
   - stylesheets/extra.css
+
+extra_javascript:
+  - javascripts/lang-switch.js
 
 nav:
   - 首页: index.md

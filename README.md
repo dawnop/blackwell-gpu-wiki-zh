@@ -9,6 +9,7 @@
   译文修正了原文的一批事实性错误，清单见 `ERRATA.md`，页面里对应位置有"译注"。
 
 在线阅读（GitHub Pages，随 `zh` 分支自动部署）：<https://dawnop.github.io/blackwell-gpu-wiki-zh/>
+页面右上角可以中英切换，英文原文挂在 `/en/` 下，切换时停留在同一页。
 
 英文原站：<https://blackwell-gpu-wiki.pages.dev/>（2026 年 9 月时已打不开）；上游仓库：<https://github.com/0xSero/blackwell-gpu-wiki>
 
@@ -37,14 +38,16 @@ pip install -r requirements.txt
 mkdocs serve
 ```
 
-然后打开 <http://127.0.0.1:8000/>。
+然后打开 <http://127.0.0.1:8000/>（只有中文；语言切换器指向的英文页面要走下面的双语构建）。
 
-## 构建静态站
+## 构建双语静态站
 
 ```bash
-mkdocs build
-# 输出在 ./site
+./build-all.sh          # site/ 是中文，site/en/ 是英文原文（从 main 分支导出）
+python3 -m http.server -d site 8000
 ```
+
+然后打开 <http://127.0.0.1:8000/blackwell-gpu-wiki-zh/>。
 
 ## 协议
 
