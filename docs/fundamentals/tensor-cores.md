@@ -61,24 +61,25 @@ wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16  %rd0, %rd1, %rd2, %rd3;
 - **异步**：warp 发射指令后继续干别的活；结果稍后才落地。通过 `wgmma.commit_group.sync` 和 `wgmma.wait_group.sync` 同步。
 - **warp 组**：一个 *warp 组*是 4 个 warp（128 线程）。MMA 由整个 warp 组发射，而不是单个 warp。
 - **tile 更大**：从 m64n128k16 到 m64n256k16，而 mma.sync 只有 m16n8k16。同样的逻辑工作量，发射的指令更少。
-- **Hopper 以及兼容 Hopper 的 Blackwell**：SM 9.0 和 SM 10.0（数据中心版 Blackwell）都能跑。**SM 12.0 上也能跑，但 Tensor Core 吞吐低于数据中心版。**（译注：按 NVIDIA PTX ISA，`wgmma` 只在 `sm_90a` 上可用，SM100/SM120 并不支持，原文此处与 NVIDIA 官方文档不一致。）
+- **只有 Hopper**：`wgmma` 是 `sm_90a` 专属指令。数据中心版 Blackwell 用 `tcgen05.mma` 取代了它，工作站版 Blackwell 则只有 `mma.sync`。**Blackwell 两个分支都不能跑 `wgmma`。**（译注：原文称 SM 10.0 和 SM 12.0 也能跑，与 PTX ISA 不符，已改。）
 
 `wgmma.async` 开启了"warp 组上一切皆异步"的时代。现代 Hopper kernel（FA-3、CUTLASS 的 Hopper 模板）都重度依赖它。
 
 ### `tcgen05.mma`——仅限数据中心版 Blackwell
 
 ```ptx
-tcgen05.mma.cta_group::1.kind::f4 [%tmem_d], [%tmem_a], [%tmem_b], %scale_a, %scale_b;
-//          ^^^^^^^^^^^^ ^^^^^^^^
-//          单 CTA        FP4 输入
+tcgen05.mma.cta_group::1.kind::mxf4nvf4.block_scale.scale_vec::4X
+    [%tmem_d], %a_desc, %b_desc, %idesc, [%tmem_scale_a], [%tmem_scale_b], %acc;
+//          ^^^^^^^^^^^^ ^^^^^^^^^^^^^^
+//          单 CTA        FP4 输入，带块缩放因子
 ```
 
 特点：
 
-- **异步且解耦**：比 `wgmma` 更彻底。操作数和结果都用 **TMEM 地址**寻址，而不是寄存器。对发射它的 warp 来说，发射这条指令几乎不花时间。
-- **tile 更大**：单 CTA 最大 m128n128k64，CTA pair（用 `cta_group::2`）最大 m256n128k64。
-- **CTA pair / 双 CTA cluster 模式**：两个 CTA 通过 cluster 共享内存和 TMEM 协作，对一个更大的 tile 发射一条 MMA。需要 `.cluster_dim 2,1,1`。**仅 SM100。**
-- **配套指令**：`tcgen05.alloc` 分配 TMEM，`tcgen05.commit` 做完成屏障，`tcgen05.cp` 把 TMEM 拷出到 SMEM。
+- **异步且解耦**：比 `wgmma` 更彻底。A、B 通过 SMEM 矩阵描述符给出（A 也可以放在 TMEM），累加器和块缩放因子都在 **TMEM** 里，寄存器完全不参与。整条指令由**单个线程**发射，几乎不花时间。
+- **tile 更大**：单 CTA 最大 M=128、N=256；CTA pair（用 `cta_group::2`）最大 M=256、N=256（译注：原文写 m128n128k64 / m256n128k64，按 PTX ISA 已改）。
+- **CTA pair / 双 CTA cluster 模式**：两个 CTA 各出一半 SMEM 里的操作数、各收一半 TMEM 里的结果，对一个更大的 tile 只发射一条 MMA。需要 cluster 维度为 2。**仅 SM100。**
+- **配套指令**：`tcgen05.alloc` 分配 TMEM，`tcgen05.commit` 把完成挂到 mbarrier 上，`tcgen05.ld` / `tcgen05.st` 在 TMEM 和寄存器之间搬数据，`tcgen05.cp` 从 SMEM 拷进 TMEM。
 - **仅 SM100。** **SM120 上不能用。**
 
 `tcgen05` 之所以存在，是因为到了 FP4/FP6 这种吞吐水平，warp 组 MMA 的做法开始卡在寄存器堆带宽上——warp 发射 MMA 指令的速度跟不上 Tensor Core 的消耗速度。把累加器从寄存器搬到 TMEM 之后，warp 发射一条 `tcgen05.mma`，Tensor Core 就在 TMEM 里一路算完，warp 可以同时去干别的。
@@ -90,11 +91,12 @@ tcgen05.mma.cta_group::1.kind::f4 [%tmem_d], [%tmem_a], [%tmem_b], %scale_a, %sc
 | 指令族 | SM 7.x | SM 8.x | SM 9.0 | SM 10.0 | SM 12.0 |
 | --- | :---: | :---: | :---: | :---: | :---: |
 | `mma.sync` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `wgmma.async` | | | ✓ | ✓ | ✓¹ |
+| `wgmma.async` | | | ✓ | | |
 | `tcgen05.mma`（单 CTA） | | | | ✓ | |
 | `tcgen05.mma`（CTA pair） | | | | ✓ | |
+| 块缩放 `mma.sync`（`kind::mxf4nvf4` 等） | | | | | ✓ |
 
-¹ 可用，但 Tensor Core 吞吐更低；在消费级 Blackwell 上不是最优路径。
+（译注：原文表里 `wgmma.async` 在 SM 10.0 和 12.0 两列都打了勾，与 PTX ISA 不符，已改；另补上 SM 12.0 专属的块缩放 `mma.sync` 一行。）
 
 ## CUTLASS 怎么选
 
@@ -103,19 +105,19 @@ CUTLASS 作为高性能 GEMM 的参考库，为每个 MMA 指令族维护了各�
 - `cutlass/include/cutlass/gemm/collective/sm80_*`——Ampere，基于 `mma.sync`
 - `cutlass/include/cutlass/gemm/collective/sm90_*`——Hopper，基于 `wgmma`
 - `cutlass/include/cutlass/gemm/collective/sm100_*`——数据中心版 Blackwell，基于 `tcgen05`
-- `cutlass/include/cutlass/gemm/collective/sm120_*`——工作站版 Blackwell，目前基于 `mma.sync` 或 `wgmma`
+- `cutlass/include/cutlass/gemm/collective/sm120_*`——工作站版 Blackwell，基于 `mma.sync`（含块缩放版）
 
-实例化一个 CUTLASS GEMM 时，你指定目标架构，模板就会选对应的 MMA 指令族。SM100 模板的目标是 **`sm_100a`**，因为它们需要 `tcgen05`。SM120 模板的目标是 **`sm_120` 或 `sm_120f`**，走的是更老但依然有效的 `mma.sync` / `wgmma` 路径。
+实例化一个 CUTLASS GEMM 时，你指定目标架构，模板就会选对应的 MMA 指令族。SM100 模板的目标是 **`sm_100a`**，因为它们需要 `tcgen05`。SM120 模板的目标是 **`sm_120a`**（块缩放 `mma.sync` 是 `a` 专属）或 **`sm_120` / `sm_120f`**，走的是更老但依然有效的 `mma.sync` 路径（译注：原文写 `mma.sync` / `wgmma`，SM120 没有 `wgmma`）。
 
 这就是为什么用 CUTLASS 针对一个目标编出来的库，在另一个目标上跑不了：二进制里的指令本身就不一样。
 
 ## 性能视角
 
-FP4 精度下，SM100 上一个 Tensor Core 每周期能发射一条 m128n128k64 的 MMA——也就是每个 Tensor Core 每周期 1,048,576 次乘累加。B100 有 144 个 SM，每个 SM 有多个 Tensor Core，FP4 算力约 5 PFLOPs。
+FP4 精度下，一条 m128n256k64 的 `tcgen05.mma` 含 128×256×64 ≈ 210 万次乘累加，Tensor Core 要花很多个周期才能算完，并不是"每周期一条"。按 B200 公开的 FP4 稠密峰值（约 9 PFLOPS）、148 个 SM、约 1.8–1.9 GHz 反推，每个 SM 每周期大约 1.6 万次 FP4 乘累加（每个 SM 4 个 Tensor Core，各约 4 千次）。（译注：原文写"每个 Tensor Core 每周期发射一条 m128n128k64，即 1,048,576 次乘累加"，数量级差了两百多倍；"B100 144 个 SM、约 5 PFLOPs"也与公开规格不符，已按 B200 的公开数字改写。）
 
 在 SM120 上，没有 `tcgen05`，同样的工作要退回去发射一大堆 `mma.sync m16n8k32`。单个 Tensor Core 的算术吞吐是差不多的——Tensor Core 硬件本身相同——但*调度开销*（发射的指令更多、寄存器堆流量更大）拉低了实际能达到的吞吐。
 
-一个粗略的经验法则：SM120 上的 GEMM kernel **每 FLOP 只能达到 SM100 峰值的 40–70 %**，再加上 SM120 硬件 SM 数量更少、时钟功耗预算更低，绝对吞吐远低于 SM100。RTX PRO 6000 Workstation 的 FP4 约 125 TFLOPs；B100 约 5 PFLOPs。**绝对差距 40 倍，大致一半来自硬件、一半来自 ISA。**
+一个粗略的经验法则：SM120 上的 GEMM kernel **每 FLOP 只能达到 SM100 峰值的 40–70 %**。再看硬件本身：按 NVIDIA 公开规格，RTX PRO 6000 Blackwell 的 FP4 峰值约 4 PFLOPS（稀疏）、约 2 PFLOPS（稠密），B200 约 18 / 9 PFLOPS——**绝对差距约 4–5 倍**。而 GB202 的 SM 数（188 个）比 B200（148 个）还多、频率也更高，折算到每个 SM 每周期，差距约 8 倍——这一部分才是 Tensor Core 数据通路和 ISA（有没有 `tcgen05` / TMEM）造成的。（译注：原文写"RTX PRO 6000 约 125 TFLOPs、B100 约 5 PFLOPs、相差 40 倍、一半来自硬件一半来自 ISA"，与公开规格不符，已改。）
 
 ## 常见的 tile 形状
 

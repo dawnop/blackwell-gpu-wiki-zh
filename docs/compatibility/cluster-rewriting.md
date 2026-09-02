@@ -6,7 +6,7 @@ kernel 假定 cluster 大小 > 1，却要跑在 cluster 不可用的硬件上，
 
 线程块簇（cluster，见 [`blackwell/thread-block-clusters`](../blackwell/thread-block-clusters.md)）把多个 CTA 编成一组，组内可以通过分布式共享内存互相访问 SMEM。在 SM100 上，大小 2–8 的 cluster 是家常便饭。在 SM120 上，**唯一安全的 cluster 大小是 1**：没有 cluster 级共享 SMEM，没有 cluster pair MMA，也没有 cluster 分布式 TMA。
 
-如果 kernel 写的时候假定了 `cluster_dim > 1`，就必须改写。有三种思路（译注：下文实际列了四种）。
+如果 kernel 写的时候假定了 `cluster_dim > 1`，就必须改写。有四种思路（译注：原文写"三种"，下文实际列了四种）。
 
 ## 思路 1：塌缩成单 CTA
 

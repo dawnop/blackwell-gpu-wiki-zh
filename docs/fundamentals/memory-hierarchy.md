@@ -66,13 +66,13 @@ CUDA 提供静态 SMEM（编译期定大小，用 `__shared__` 声明）和动�
 - **范围**：warp 组/CTA，通过 `tcgen05.alloc` 分配
 - **延迟**：被异步的 TMA / `tcgen05.commit` 操作掩盖
 
-TMEM 存在的原因是：最大的 `tcgen05.mma` tile（m256n128k64）累加出的结果数据有 32 KB（译注：按 256×128 个 FP32 元素算应为 128 KB，32K 是元素个数）——远超寄存器能装下的量，放 SMEM 也不合适（会吃掉整个预算）。TMEM 给了 Tensor Core 一块私有的累加器空间，把寄存器和 SMEM 腾出来干别的。
+TMEM 存在的原因是：`tcgen05.mma` 的累加器很大——单 CTA 最大的 m128n256 tile 有 128×256 个 FP32，就是 128 KB；CTA pair 的 m256n256 更是 256 KB（译注：原文写"m256n128k64 的累加器 32 KB"，32K 是元素个数，不是字节数；tile 上限也按 PTX ISA 改了）——远超寄存器能装下的量，放 SMEM 也不合适（会吃掉整个预算）。TMEM 给了 Tensor Core 一块私有的累加器空间，把寄存器和 SMEM 腾出来干别的。
 
 **SM120 没有对应的东西。** 任何用到 TMEM 的 kernel 都必须重写：要么切成更小的 tile（累加器小到能放进寄存器），要么把累加器经由 SMEM 中转（占用那 99 KiB 的预算）。见 [`compatibility/translating-tcgen05`](../compatibility/translating-tcgen05.md)。
 
 ### L1 / L2 缓存
 
-**L1**：每 SM 一份，与 SMEM 共用硬件预算。L1+SMEM 合计在 Hopper/数据中心版 Blackwell 上是 228 KiB，在工作站 Blackwell 上是 128 KiB（译注：Hopper 每 SM 的 L1+SMEM 合计实际为 256 KB，228 KiB 是 SMEM 可配置的最大值）。L1 与 SMEM 之间的划分是动态的；你申请的 SMEM 划分量决定了 L1 的大小。
+**L1**：每 SM 一份，与 SMEM 共用硬件预算。L1+SMEM 合计在 Hopper/数据中心版 Blackwell 上是每 SM 256 KB（其中最多 228 KB 可配置给 SMEM），在工作站 Blackwell 上是每 SM 128 KB（译注：原文把合计写成 228 KiB，那是 SMEM 可配置的最大值，不是 L1+SMEM 的总量）。L1 与 SMEM 之间的划分是动态的；你申请的 SMEM 划分量决定了 L1 的大小。
 
 **L2**：全设备共享，H100 上 40 MB，B100 上 50 MB，B200 上约 96 MB，消费级 Blackwell 上略小一些。L2 缓存对全局内存的访问，掩盖一部分 HBM 延迟。
 
@@ -122,7 +122,8 @@ ld.local.u32  %r0, [%addr];   // 线程本地内存加载（寄存器溢出）
 ldmatrix.sync.aligned.x4.shared.b16  ...   // 从 SMEM 加载矩阵 tile（Ampere+）
 cp.async.ca.shared.global             ...   // 异步拷贝 全局→SMEM（Ampere+）
 cp.async.bulk.tensor.shared::cluster.global ... // TMA（Hopper+，数据中心版）
-tcgen05.cp.shared::cta::tmem.b64      ...   // TMEM 拷贝（仅数据中心版 Blackwell）
+tcgen05.cp.cta_group::1.128x256b      ...   // SMEM→TMEM 拷贝（仅数据中心版 Blackwell）
+tcgen05.ld.sync.aligned.32x32b.x32.b32 ... // TMEM→寄存器（仅数据中心版 Blackwell）
 ```
 
 与 SM100 相比，SM120 上可用的访存指令集明显缩水。具体来说，**TMEM 拷贝、簇级共享的 TMA，以及 `tcgen05.cp` 在 SM120 上都不存在**。

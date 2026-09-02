@@ -27,7 +27,7 @@ Triton 编译器负责：
 
 1. 调度迭代空间，把它映射到 GPU 线程上
 2. 分配寄存器和 SMEM
-3. 把 `tl.dot` 降级成 `mma.sync` 或 `wgmma.async`（新版本在 SM100 上还能降成 `tcgen05.mma`）
+3. 把 `tl.dot` 降级成 `mma.sync`（Hopper 上是 `wgmma.async`；新版本在 SM100 上能降成 `tcgen05.mma`）
 4. 处理同步、向量化等底层细节
 
 结果是一个**速度通常能达到手工调优的 CUTLASS 同类 kernel 的 70–90 %**、而**代码量少得多**的 kernel。
@@ -38,8 +38,8 @@ Triton 3.0+ 支持 SM80 到 SM120。编译器在编译时根据设备生成适�
 
 - SM80–SM89：`mma.sync`
 - SM90：划算的地方用 `wgmma.async`
-- SM100：大 tile 用 `tcgen05.mma`，小 tile 用 `wgmma`（还在推进中，不是所有路径都用上了 `tcgen05`）
-- SM120：`mma.sync` 和 `wgmma.async`，没有 `tcgen05`
+- SM100：大 tile 用 `tcgen05.mma`，其余用 `mma.sync`（还在推进中，不是所有路径都用上了 `tcgen05`）
+- SM120：只有 `mma.sync`，没有 `tcgen05`（译注：原文两行都提到 `wgmma`，Blackwell 上没有它，已改）
 
 SM120 路径支持得很好。从 Triton 3.0 起就有专门针对 SM120 的测试。
 

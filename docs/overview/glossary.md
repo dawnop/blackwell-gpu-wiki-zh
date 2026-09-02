@@ -10,7 +10,7 @@
 
 **`sm_NNa`**——"架构专属加速"（architecture-specific accelerated）。允许使用不可移植的指令（例如 `sm_100a` 开启 `tcgen05.*`）。带 `a` 后缀编译出的代码只能在这一个精确的计算能力上运行——早的不行，晚的也不行。
 
-**`sm_NNf`**——"向前兼容"（forward-compatible）。把代码限制在能在 `sm_NN` 以及之后所有同主版本架构上运行的指令范围内。适合需要同时在 `sm_120` 工作站芯片和未来任何 `sm_12N` 芯片上运行的代码。
+**`sm_NNf`**——"家族专用"（family-specific；译注：原文称 forward-compatible，NVIDIA 的正式叫法是 family-specific）。把代码限制在能在 `sm_NN` 以及同一家族后续架构上运行的指令范围内。适合需要同时在 `sm_120` 工作站芯片和未来任何 `sm_12N` 芯片上运行的代码。
 
 ## 架构与代号
 
@@ -42,11 +42,11 @@
 
 **`mma.sync`**——通用的 Tensor Core MMA 指令，自 Volta 起可用。同步：warp 阻塞直到结果落入寄存器。作用于小 tile（m16n8k16 / m16n8k32）。SM100 和 SM120 上**都**可用。
 
-**`wgmma.async`**——Hopper 的 warp 组异步 MMA。tile 更大，异步执行。在数据中心版 Blackwell 上基本被 `tcgen05.mma` 取代；Hopper 上仍然支持。
+**`wgmma.async`**——Hopper 的 warp 组异步 MMA。tile 更大，异步执行。只在 `sm_90a` 上可用：数据中心版 Blackwell 换成了 `tcgen05.mma`，工作站版 Blackwell 只有 `mma.sync`（译注：原文多处暗示 Blackwell 也能跑 `wgmma`，按 PTX ISA 已改）。
 
-**`tcgen05.mma`**——数据中心版 Blackwell 的 MMA 指令族。异步、大 tile（单 CTA 最大 m128n128k64，CTA pair 最大 m256n128k64），累加器放在 TMEM 里。**仅数据中心版可用。** 见 [`blackwell/tcgen05-and-tmem`](../blackwell/tcgen05-and-tmem.md)。
+**`tcgen05.mma`**——数据中心版 Blackwell 的 MMA 指令族。异步、大 tile（单 CTA 最大 M=128、N=256，CTA pair 最大 M=256、N=256；K 按数据宽度定，FP4 时为 64），累加器放在 TMEM 里。**仅数据中心版可用。** 见 [`blackwell/tcgen05-and-tmem`](../blackwell/tcgen05-and-tmem.md)。
 
-**`tcgen05.alloc` / `tcgen05.commit` / `tcgen05.cp`**——配套指令，分别负责 TMEM 的分配、完成同步和拷出。
+**`tcgen05.alloc` / `tcgen05.commit` / `tcgen05.ld` / `tcgen05.st` / `tcgen05.cp`**——配套指令：分配 TMEM、把已发射的异步操作挂到 mbarrier 上等完成、TMEM 与寄存器之间读写、从 SMEM 拷进 TMEM（只有这一个方向，TMEM 里的结果要经寄存器才能出来）。
 
 ## 数值格式
 
@@ -88,7 +88,7 @@
 
 **MNNVL（Multi-Node NVLink，多节点 NVLink）**——NVL72 级别的 fabric，把 NVLink 扩展到跨机架（最多 72 张 GPU）。
 
-**PCIe**——通用的主机侧互连。Gen4（每 lane 16 GB/s），Gen5（每 lane 32 GB/s）。x16 → 每方向 32 GB/s 或 64 GB/s（译注：原文按每 lane 给出的数字实际是 x16 单向总带宽；PCIe Gen4 x16 单向约 32 GB/s，Gen5 x16 单向约 64 GB/s）。
+**PCIe**——通用的主机侧互连。Gen4 每 lane 16 GT/s（约 2 GB/s 每方向），Gen5 每 lane 32 GT/s（约 4 GB/s 每方向）。x16 → 每方向约 32 GB/s（Gen4）或 64 GB/s（Gen5）（译注：原文把每 lane 的速率写成 16 / 32 GB/s，那是 GT/s，已改）。
 
 **P2P（peer-to-peer）**——GPU 之间直接访问彼此显存，不经过主机内存中转。GPU 共用同一个交换芯片或 root complex 时可用。
 

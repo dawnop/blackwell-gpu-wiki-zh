@@ -28,7 +28,7 @@ GitHub：`IST-DASLab/marlin`。协议：Apache-2.0。
 | 数据中心版 Blackwell（SM 10.0） | 可用，比原生 NVFP4 慢 |
 | 工作站版 Blackwell（SM 12.0） | **可用**，往往是实际可行的快速路径 |
 
-在工作站 Blackwell 上，当 NVFP4 路径走不通或有 bug 时（DeepGEMM 没移植、CUTLASS NVFP4 撞上 SMEM 断崖），Marlin 是一个可行的替代。代价是权重略大一点（含元数据约 4 位 → 约 4.25 位，对比 NVFP4 的 4.5 位——其实反而略*小*），以及在某些模型上精度略低。
+在工作站 Blackwell 上，当 NVFP4 路径走不通或有 bug 时（DeepGEMM 没移植、CUTLASS NVFP4 撞上 SMEM 断崖），Marlin 是一个可行的替代。权重体积并不吃亏（含元数据约 4.25 位/权重，比 NVFP4 的 4.5 位还略*小*），代价是在某些模型上精度略低（译注：原文先说"权重略大"又说"其实略小"，自相矛盾，已按算出来的数字改）。
 
 ### 常见故障
 

@@ -63,23 +63,27 @@ NVFP4 用**略多一点的存储**（每元素 4.5 位对 4.19 位，约 7 % 的
 在 Blackwell 上，一个 NVFP4 GEMM 会编译成以 NVFP4 为输入、输出 FP32（或 BF16、FP8）的 MMA 指令。反量化发生在 **Tensor Core 内部**——MMA 之前不需要单独的"反量化 kernel"。
 
 ```ptx
-// 数据中心版 Blackwell（SM100）—— 使用 tcgen05
-tcgen05.mma.cta_group::1.kind::nvf4
+// 数据中心版 Blackwell（SM100）—— 使用 tcgen05（译注：原文拼法不存在，已按 PTX ISA 改写）
+tcgen05.mma.cta_group::1.kind::mxf4nvf4.block_scale.scale_vec::4X
     [%tmem_d],              // TMEM 里的 FP32 累加器
-    [%smem_a],              // NVFP4 操作数 A
-    [%smem_b],              // NVFP4 操作数 B
-    %scale_a, %scale_b;     // E4M3 缩放因子寄存器
+    %a_desc,                // NVFP4 操作数 A 的 SMEM 描述符
+    %b_desc,                // NVFP4 操作数 B 的 SMEM 描述符
+    %idesc,                 // 形状 / 类型描述
+    [%tmem_sfa], [%tmem_sfb], // E4M3 缩放因子（放在 TMEM 里）
+    %acc;
 
-// 工作站版 Blackwell（SM120）—— 使用 mma.sync 链
-// （对更大逻辑 tile 中的每个 m16n8k32 子 tile：）
-mma.sync.aligned.m16n8k32.row.col.f32.e2m1.e2m1.f32
+// 工作站版 Blackwell（SM120，sm_120a）—— 使用块缩放 mma.sync 链
+// （对更大逻辑 tile 中的每个 m16n8k64 子 tile：）
+mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue4m3
     {%rd0, %rd1, %rd2, %rd3},     // FP32 累加器
-    {%ra0, %ra1},                  // NVFP4 操作数 A（缩放因子隐式处理）
+    {%ra0, %ra1, %ra2, %ra3},     // NVFP4 操作数 A
     {%rb0, %rb1},                  // NVFP4 操作数 B
-    {%rc0, %rc1, %rc2, %rc3};      // FP32 输入累加器
+    {%rc0, %rc1, %rc2, %rc3},      // FP32 输入累加器
+    %sfa, {%bid_a, %tid_a},        // A 的 E4M3 缩放因子（寄存器）及选择位
+    %sfb, {%bid_b, %tid_b};        // B 的缩放因子
 ```
 
-两条路径用的是**同一套 Tensor Core 硬件**，区别只在发射指令。SM100 的 `tcgen05.mma.kind::nvf4` 异步地把更大的 tile 发射到 TMEM；SM120 的 `mma.sync.m16n8k32.f32.e2m1.e2m1.f32` 同步地把更小的 tile 发射到寄存器。
+两条路径用的是**同一套 Tensor Core 硬件**，区别只在发射指令。SM100 的 `tcgen05.mma.kind::mxf4nvf4` 异步地把更大的 tile 发射到 TMEM；SM120 的块缩放 `mma.sync.m16n8k64` 同步地把更小的 tile 发射到寄存器。
 
 ## 缩放因子布局问题
 
@@ -142,7 +146,7 @@ NVFP4 与最好的 INT4 方案不相上下，略优于 MX-FP4。它真正的优�
 
 ## REAP 与 NVFP4 联用
 
-REAP（REbalanced Activation Pruning）是一种 MoE 专用的剪枝技术，会把整个专家从模型里去掉。和 NVFP4 量化结合，REAP 能产出质量损失极小的紧凑模型：
+REAP（Router-weighted Expert Activation Pruning，按路由权重的专家激活剪枝；译注：原文此处展开成 REbalanced Activation Pruning，与缩写表和论文不一致，已统一）是一种 MoE 专用的剪枝技术，会把整个专家从模型里去掉。和 NVFP4 量化结合，REAP 能产出质量损失极小的紧凑模型：
 
 - 原始 GLM-5.1：744B 参数，BF16 约 1.5 TB
 - REAP-160（256 个专家保留 160 个）：478B 参数，BF16 约 960 GB

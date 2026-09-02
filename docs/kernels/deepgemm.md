@@ -56,14 +56,15 @@ RuntimeError: CUDA error: no kernel image is available for execution on the devi
 **移植正在进行中。** 这项工作并不轻松，因为每个 kernel 都直接使用 `tcgen05`：
 
 ```cuda
-// 摘自某个 DeepGEMM kernel：
+// DeepGEMM kernel 里这类内联 PTX 的示意（译注：原文的指令拼法不存在，已按 PTX ISA 改写）：
 asm volatile(
-    "tcgen05.alloc.cta_group::1.b32 %0, 16384;\n"
-    : "=r"(tmem_base)
+    "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], 128;\n"
+    : : "r"(smem_slot)                       // TMEM 地址会被写到这个 SMEM 位置
 );
 asm volatile(
-    "tcgen05.mma.cta_group::1.kind::nvf4 [%0], [%1], [%2], %3, %4;\n"
-    : : "r"(tmem_base), "r"(smem_a), "r"(smem_b), "r"(scale_a), "r"(scale_b)
+    "tcgen05.mma.cta_group::1.kind::mxf4nvf4.block_scale.scale_vec::4X "
+    "[%0], %1, %2, %3, [%4], [%5], p;\n"
+    : : "r"(tmem_d), "l"(a_desc), "l"(b_desc), "r"(idesc), "r"(tmem_sfa), "r"(tmem_sfb)
 );
 ```
 
@@ -100,7 +101,7 @@ SGLANG_ENABLE_DEEP_GEMM=0
 
 **故障 1：`no kernel image`**——DeepGEMM 的 cubin 只有 SM100 版本。见上文。
 
-**故障 2：缩放因子布局不匹配**——DeepGEMM 使用的是某种特定形式的 NVFP4 布局（块交错，FP8 E4M3 缩放因子）。如果模型文件是按 MX-FP4 布局（OCP 标准，块大小 32，FP6 E3M2 缩放因子）保存的，通过 DeepGEMM 加载会悄无声息地算出垃圾。（译注：OCP MXFP4 规范里的块缩放因子是 E8M0，不是 FP6 E3M2。）有些模型两种布局都提供，要选对。
+**故障 2：缩放因子布局不匹配**——DeepGEMM 使用的是某种特定形式的 NVFP4 布局（块交错，FP8 E4M3 缩放因子）。如果模型文件是按 MX-FP4 布局（OCP 标准，块大小 32，E8M0 缩放因子）保存的，通过 DeepGEMM 加载会悄无声息地算出垃圾。（译注：原文把 MX-FP4 的缩放因子写成 FP6 E3M2，按 OCP 规范已改为 E8M0。）有些模型两种布局都提供，要选对。
 
 **故障 3：半途而废的移植尝试污染了 JIT 缓存**
 

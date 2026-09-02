@@ -25,7 +25,7 @@ GitHub：`Dao-AILab/flash-attention`。作者：Tri Dao 及合作者。MIT 协�
 
 ## SM100 的情况
 
-**FA-2** 通过通用 kernel 路径跑在 SM100 上，吞吐说得过去但不是最优（走的是 `wgmma.async` 和 `mma.sync` 路径，没有用 `tcgen05`）。
+**FA-2** 通过通用 kernel 路径跑在 SM100 上，吞吐说得过去但不是最优（走的是 `mma.sync` 路径，没有用 `tcgen05`；译注：原文还写了 `wgmma.async`，Blackwell 上没有它）。
 
 **FA-3** 支持 Hopper（它的主要目标），也能在 SM100 上跑，因为 SM100 大体上是 Hopper 的扩展（cluster、TMA、FP8）。但 FA-3 还没有利用 `tcgen05`——FA-3 在 SM100 上相对 FA-2 的提速和它在 Hopper 上差不多（约 30 %），远不到基于 `tcgen05` 重新设计后能带来的那种大幅提升。
 

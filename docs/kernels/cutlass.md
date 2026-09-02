@@ -42,7 +42,7 @@ CUTLASS 3.5+ 在 `cutlass/include/cutlass/gemm/collective/sm100_*` 和 `cutlass/
 CUTLASS 3.6+ 在 `sm120_*` 下有一套平行的模板。这些模板：
 
 - 目标是 `sm_120`（或者为了向前兼容用 `sm_120f`）
-- 用 `mma.sync` 和 `wgmma.async` 代替 `tcgen05.mma`
+- 用 `mma.sync`（含 `sm_120a` 专属的块缩放 `mma.sync`）代替 `tcgen05.mma`（译注：原文写 `mma.sync` 和 `wgmma.async`，SM120 没有 `wgmma`）
 - 累加器放在**寄存器**里（tile 要小一些才装得下），或者经 SMEM 暂存（tile 更大，但 SMEM 压力也更大）
 - **只用单 CTA**（没有 `cluster_dim > 1`）
 - 限制流水线级数，以适应 99 KiB 的 SMEM 上限

@@ -36,14 +36,14 @@ __global__ __cluster_dims__(2, 1, 1) void my_kernel(...) { ... }
 
 cluster 让两个或更多 CTA 为同一个逻辑 kernel tile **合并各自的 SMEM**。有了 cluster 共享寻址，CTA-0 发的 TMA 可以把操作数 A 直接放进 CTA-1 的 SMEM——不需要经过全局内存中转。
 
-对 `tcgen05.mma.cta_group::2` 来说，cluster 是**必需的**：最大的 MMA tile（m256n128k64）需要两个 CTA 协作，因为任何一个 CTA 单独都没有足够的 TMEM。
+对 `tcgen05.mma.cta_group::2` 来说，cluster 是**必需的**：M=256 的 MMA tile 需要两个 CTA 协作，因为一个 CTA 的 TMEM 只有 128 个 lane，装不下 256 行累加器（译注：原文写 m256n128k64，CTA pair 的 N 其实可以到 256）。
 
 ## 各架构的 cluster 大小
 
 | 架构 | 最大 cluster 大小 |
 | --- | --- |
 | Volta（SM 7.0）– Ampere（SM 8.x） | 1（没有 cluster） |
-| Hopper（SM 9.0） | 最多 8（常规），16（显式开启"可移植 cluster 大小"选项后；译注：CUDA 里该属性实为 `cudaFuncAttributeNonPortableClusterSizeAllowed`，即"非可移植"） |
+| Hopper（SM 9.0） | 最多 8（可移植上限），16（给 kernel 显式打开 `cudaFuncAttributeNonPortableClusterSizeAllowed` 属性后；译注：原文写成"可移植 cluster 大小选项"，属性名和含义已改） |
 | 数据中心版 Blackwell（SM 10.0） | 最多 16 |
 | 工作站版 Blackwell（SM 12.0） | **1（没有 cluster）** |
 

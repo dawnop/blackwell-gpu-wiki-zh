@@ -74,14 +74,14 @@ NVIDIA 引入了两个后缀来管理架构专属特性：
 | --- | --- | --- |
 | （无） | 该架构的"可移植"子集 | `sm_100` |
 | `a` | "架构专属加速"——使用不可移植的特性。代码*只能*跑在这一个架构上。 | `sm_100a` |
-| `f` | "向前兼容"——只允许使用在本架构以及同一大版本后续架构上都会存在的指令 | `sm_120f` |
+| `f` | "家族专用"（family-specific）——只允许使用在本架构以及同一家族后续架构上都会存在的指令（译注：原文称"向前兼容"，NVIDIA 的正式叫法是 family-specific） | `sm_120f` |
 
 实际使用中：
 
 - **`sm_100a`** 允许 `tcgen05` 指令、MNNVL fabric 调用以及其他 GB100 专属特性。编出来的 SASS 只能跑在 10.0 设备上。
 - **`sm_100`** 是更保守的目标，不含上述特性。
 - **`sm_120a`** 允许 GB202 专属特性（例如只在消费级 Blackwell 上才有的某些 Tensor Core 变体），只能跑在 12.0 上。
-- **`sm_120f`** 是"面向未来"的子集，能跑在 `sm_120` 和之后所有 12.x 架构上。适合要覆盖一大批消费级 Blackwell 型号的库。
+- **`sm_120f`** 是"家族"子集，能跑在 `sm_120` 和同一家族之后的 12.x 架构上。适合要覆盖一大批消费级 Blackwell 型号的库。
 
 NVIDIA 自家的库里就能看到后缀的选择：
 
@@ -154,13 +154,13 @@ CUDA error: no kernel image is available for execution on the device
    没有 `sm_120` 的 cubin → 这就是加载失败的原因。
 3. **检查有没有 PTX 回退**：`cuobjdump --dump-ptx libfoo.so | head`。如果有 PTX，看它的目标：
    ```
-   .version 8.5
+   .version 8.7
    .target sm_100a
    ```
    目标是 `sm_100a` → JIT 到 `sm_120` 同样会失败（1x 家族里的不同大版本分支）。
 4. **读 PTX**：搜 `tcgen05`。如果有：
    ```
-   tcgen05.alloc.cta_group::1 %rd5, 16384;
+   tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%r5], 128;
    ```
    确认了：这个 kernel 用了数据中心专属指令。没有任何自动回退。
 

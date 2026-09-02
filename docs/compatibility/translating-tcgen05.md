@@ -6,18 +6,20 @@
 
 一条 `tcgen05.mma` 指令干的活，相当于很多条 `mma.sync`。翻译的本质是**形状拆分**：
 
+（译注：原文这张表的条数算错了——`mma.sync` 的 N 是 8 不是 16，FP4 在 SM120 上的形状是 m16n8k64；下表按 M/16 × N/8 × K/k 重算。）
+
 | `tcgen05.mma` 形状 | 等价的 `mma.sync` 条数 | `mma.sync` 形状 |
 | --- | --- | --- |
-| `m64n64k16`（FP16） | 16 | m16n8k16（m、n 方向 4×4 网格；k 方向 1 份） |
-| `m64n64k32`（FP8） | 8 | m16n8k32（m、n 方向 4×4；k 方向 0.5× 缩放） |
-| `m64n64k64`（FP4） | 4 | m16n8k32（m、n 方向 4×4；k 方向分两趟累加） |
-| `m128n128k64`（FP4，单 CTA） | 16（n 方向再 ×2） | m16n8k32 |
-| `m128n256k64`（FP4，单 CTA） | 32 | m16n8k32 |
-| `m256n128k64`（FP4，**CTA pair**） | （SM120 上没有单 CTA 等价物） | —— |
+| `m64n64k16`（FP16） | 32 | m16n8k16（m 方向 4 份 × n 方向 8 份；k 方向 1 份） |
+| `m64n64k32`（FP8） | 32 | m16n8k32（4 × 8；k 方向 1 份） |
+| `m64n64k64`（FP4） | 32 | m16n8k64（`kind::mxf4nvf4.block_scale`，4 × 8；k 方向 1 份） |
+| `m128n128k64`（FP4，单 CTA） | 128 | m16n8k64（8 × 16） |
+| `m128n256k64`（FP4，单 CTA） | 256 | m16n8k64（8 × 32） |
+| `m256n256k64`（FP4，**CTA pair**） | （SM120 上没有单 CTA 等价物） | —— |
 
-最大的单 CTA `tcgen05.mma`（m128n256k64）拆开后，每个累加器 tile 对应 32 条 `mma.sync m16n8k32`。配上流水线还能接受；不配流水线就全部串行。
+最大的单 CTA `tcgen05.mma`（m128n256k64）拆开后，每个累加器 tile 对应 256 条 `mma.sync m16n8k64`，分到 4 个 warp 上每个 warp 64 条。配上流水线还能接受；不配流水线就全部串行。
 
-最大的 `tcgen05.mma.cta_group::2` 形状（m256n128k64）**没有单 CTA 等价物**。要翻译它，你必须：
+最大的 `tcgen05.mma.cta_group::2` 形状（m256n256k64）**没有单 CTA 等价物**。要翻译它，你必须：
 
 - 把工作切成两半
 - 每一半按单 CTA tile 处理
@@ -29,30 +31,36 @@
 
 原始 SM100 PTX：
 
+（译注：原文示例用的是不存在的指令拼法，下面按 PTX ISA 重写，仍是示意。）
+
 ```ptx
-// 为累加器分配 16 KB TMEM
+// 为 m64n64 的 FP32 累加器分配 64 列 TMEM（128 lane × 64 列 × 4 B = 32 KB，M=64 只用一半 lane）
+.shared .b32 tmem_slot;
 .reg .b32 %tmem_d_addr;
-tcgen05.alloc.cta_group::1 %tmem_d_addr, 16384;
+tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [tmem_slot], 64;
+tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned;
+// ...fence + bar.sync 之后从 tmem_slot 读出 %tmem_d_addr...
 
-// 发射 MMA：D = A * B + D，NVFP4 输入，FP32 累加器
-tcgen05.mma.cta_group::1.kind::nvf4
+// 单个线程发射 MMA：D = A * B + D，NVFP4 输入，FP32 累加器，块缩放因子已放在 TMEM
+tcgen05.mma.cta_group::1.kind::mxf4nvf4.block_scale.scale_vec::4X
     [%tmem_d_addr],         // 累加器位置（TMEM）
-    [%smem_a_desc],         // A 描述符（SMEM）
-    [%smem_b_desc],         // B 描述符（SMEM）
-    %scale_a,
-    %scale_b;
+    %a_desc,                // A 描述符（SMEM）
+    %b_desc,                // B 描述符（SMEM）
+    %idesc,                 // 形状 / 类型描述
+    [%tmem_scale_a],
+    [%tmem_scale_b],
+    %acc;                   // 是否累加到旧的 D
 
-// 等待完成
-.reg .b64 %sema;
-tcgen05.commit.cta_group::1 %sema;
-tcgen05.wait.cta_group::1 %sema;
+// 等待完成：commit 到 mbarrier，再 try_wait
+tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [mma_bar];
+// ...mbarrier.try_wait 循环...
 
-// 把结果从 TMEM 拷到 SMEM，交给下游
-tcgen05.cp.tmem.shared::cta.b64 [%smem_out], [%tmem_d_addr];
+// 把结果从 TMEM 读进寄存器，再交给下游
+tcgen05.ld.sync.aligned.32x32b.x16.b32 {%r0, ..., %r15}, [%tmem_d_addr];
+tcgen05.wait::ld.sync.aligned;
 
 // 释放 TMEM
-tcgen05.dealloc %tmem_d_addr, 16384;
-tcgen05.relinquish_alloc_permit;
+tcgen05.dealloc.cta_group::1.sync.aligned.b32 %tmem_d_addr, 64;
 ```
 
 翻译后的 SM120 PTX（示意）：
@@ -70,20 +78,17 @@ tcgen05.relinquish_alloc_permit;
 mov.f32 %rd0, 0.0;
 // ... %rd1 到 %rd31 同理 ...
 
-// 发射一串 mma.sync m16n8k32（NVFP4 → FP32）
-mma.sync.aligned.m16n8k32.row.col.f32.e2m1.e2m1.f32
+// 发射一串块缩放 mma.sync m16n8k64（NVFP4 → FP32，sm_120a 专属；缩放因子作为操作数直接传入）
+mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue4m3
     {%rd0, %rd1, %rd2, %rd3},      // 累加器输出
-    {%ra0, %ra1},                   // 操作数 A（NVFP4 打包）
+    {%ra0, %ra1, %ra2, %ra3},      // 操作数 A（NVFP4 打包）
     {%rb0, %rb1},                   // 操作数 B（NVFP4 打包）
-    {%rd0, %rd1, %rd2, %rd3};      // 累加器输入
+    {%rd0, %rd1, %rd2, %rd3},      // 累加器输入
+    %sa, {%bid_a, %tid_a},         // A 的块缩放因子（E4M3）及选择位
+    %sb, {%bid_b, %tid_b};         // B 的块缩放因子
 
-// ... 其余 tile 还有 31 条类似的 mma.sync ...
-
-// 应用缩放因子
-.reg .f32 %scale_combined;
-mul.f32 %scale_combined, %scale_a, %scale_b;
-mul.f32 %rd0, %rd0, %scale_combined;
-// ... 对 %rd1 到 %rd31 同样处理 ...
+// ... 这个 warp 负责的其余 7 个子 tile 还有 7 条类似的 mma.sync（m64n64 共 32 条，分到 4 个 warp）...
+// （译注：原文用的是不带块缩放的 m16n8k32 e2m1，再手工乘缩放因子；SM120 上真实可用的是上面这条，已改。）
 
 // 写 SMEM 前先同步 warp
 bar.sync 0;
@@ -94,7 +99,7 @@ st.shared.f32 [%smem_d_buf+128], %rd1;     // 每个线程存自己的 tile
 // ... 依此类推
 ```
 
-翻译后的 PTX **明显更长**：约 50 行，原来只有约 20 行。指令数也多得多（每线程 32 条 mma.sync，外加缩放逻辑）。
+翻译后的 PTX **明显更长**：约 50 行，原来只有约 20 行。指令数也多得多（m64n64k64 一个 tile 就要 32 条 `mma.sync`，每个 warp 8 条，外加加载和存储）。
 
 ## 对性能的影响
 
@@ -141,9 +146,9 @@ st.shared.f32 [smem_accumulator + offset], %rd0;
 
 ## 缩放因子的小坑
 
-NVFP4 的缩放因子需要特殊处理。`tcgen05.mma.kind::nvf4` 指令把缩放因子寄存器当作输入，在 Tensor Core 内部就把它乘上去了。而 `mma.sync.m16n8k32.f32.e2m1.e2m1.f32` 只接收原始 FP4 输入，不带内置缩放。
+NVFP4 的缩放因子在两边都由 Tensor Core 内部处理，但拿法不同：SM100 的 `tcgen05.mma.kind::mxf4nvf4.block_scale` 从 **TMEM** 读缩放因子，要求先按特定交错格式把它们搬进去；SM120 的 `mma.sync.kind::mxf4nvf4.block_scale.m16n8k64` 把缩放因子当作**寄存器操作数**传入，每个线程得手里拿着自己那份，还要用 byte-id / thread-id 选择位指明用哪一个。两边搬运缩放因子的代码完全不同，这才是翻译时的坑。（译注：原文说 SM120 的 `mma.sync` 不带缩放、要在 MMA 之后手工乘一次，与 PTX ISA 不符，已改。）
 
-翻译时把缩放放到 MMA 之后做一次乘法：
+只有当你不用块缩放版 `mma.sync`（例如先把 FP4 反量化成 FP8/BF16 再算普通 MMA）时，才需要把缩放放到 MMA 之后做一次乘法：
 
 ```ptx
 // mma.sync 指令链结束后：
@@ -184,11 +189,11 @@ def translate_tcgen05(ptx_input, target_arch="sm_120"):
             mma_chain = decompose_to_mma_sync(shape, instr.kind)
             output.extend(mma_chain)
 
-        elif instr.op == "tcgen05.cp.tmem.shared":
-            smem_src = tmem_to_smem[instr.src_addr]
-            output.append(make_shared_to_shared_copy(smem_src, instr.dst_smem))
+        elif instr.op == "tcgen05.ld":
+            # 结果本来就在寄存器里；TMEM 地址映射到对应的寄存器/SMEM 位置即可
+            output.append(map_tmem_to_regs(instr.src_addr, instr.dst_regs))
 
-        elif instr.op in ("tcgen05.commit", "tcgen05.wait"):
+        elif instr.op == "tcgen05.commit":
             # mma.sync 指令链是同步的；除了 bar.sync 不需要别的屏障
             output.append("bar.sync 0;")
 

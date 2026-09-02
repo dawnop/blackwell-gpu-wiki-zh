@@ -5,7 +5,8 @@
 两条 ISA 的分野：SM100 与 SM120 的差异、NVFP4、`tcgen05`/TMEM、MoE 推理、内核库现状和兼容方案。
 
 - `main` 分支：上游英文原文。
-- `zh` 分支：中文译文，页面路径与原文一一对应。翻译约定见 `TRANSLATION-GUIDE.md`。
+- `zh` 分支：中文译文，页面路径与原文一一对应。翻译约定见 `TRANSLATION-GUIDE.md`；
+  译文修正了原文的一批事实性错误，清单见 `ERRATA.md`，页面里对应位置有"译注"。
 
 英文原站：<https://blackwell-gpu-wiki.pages.dev/>
 

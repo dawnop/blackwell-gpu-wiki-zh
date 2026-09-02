@@ -38,7 +38,7 @@ vLLM 的大部分功能在工作站 Blackwell 上可用。例外：
 
 ```bash
 # 关掉跑不通的 kernel 路径
---quantization fp4               # 用 NVFP4（CUTLASS 路径）
+--quantization modelopt_fp4      # 用 NVFP4（CUTLASS 路径；译注：原文写 fp4，vLLM 里的选项名是 modelopt_fp4，与后文一致）
 --kv-cache-dtype fp8_e4m3        # 紧凑的 KV
 --enforce-eager                  # CUDA graph 捕获失败时跳过它
 
