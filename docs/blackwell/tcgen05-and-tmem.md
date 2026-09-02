@@ -195,7 +195,7 @@ FlashInfer 有基于 Triton 和基于 CUTLASS 的两套注意力 kernel；CUTLAS
 - 为什么 SM120 没有 `tcgen05`？
 - FP4 GEMM 上，SM120 的吞吐和 SM100 大致是什么关系？
 
-## 参见
+## 另见
 
 - [`sm100-vs-sm120`](sm100-vs-sm120.md) —— 完整的架构差异
 - [`thread-block-clusters`](thread-block-clusters.md) —— cluster 与 CTA pair MMA
