@@ -65,7 +65,7 @@ TMEM→SMEM 方向的 `tcgen05.cp`、`kind::nvf4` / `kind::f4`、把缩放因子
 | `fundamentals/memory-hierarchy` | Hopper/SM100 的 L1+SMEM 合计 228 KiB | 合计 256 KB，其中最多 228 KB 可配给 SMEM |
 | `fundamentals/number-formats` | FP32 是"1962 年的 IEEE 格式" | IEEE 754 是 1985 年 |
 | `fundamentals/number-formats`、`kernels/deepgemm` | MX-FP4 缩放因子是 FP6 E3M2，每元素 4.19 位 | OCP MX 规范是 E8M0（8 位），每元素 4.25 位 |
-| `fundamentals/tensor-cores` | 每个 Tensor Core 每周期发射一条 m128n128k64（1,048,576 次乘累加）；B100 144 个 SM、约 5 PFLOPs | 按 B200 公开峰值反推约每 SM 每周期 1.6 万次 FP4 乘累加；B200 148 个 SM、FP4 稠密约 9 PFLOPS |
+| `fundamentals/tensor-cores` | 每个 Tensor Core 每周期发射一条 m128n128k64（1,048,576 次乘累加）；B100 144 个 SM、约 5 PFLOPs | 按 B200 公开峰值反推约每 SM 每周期 1.4 万次 FP4 乘累加；B200 148 个 SM、2.1 GHz、FP4 稠密 9 PFLOPS |
 | `fundamentals/tensor-cores` | RTX PRO 6000 FP4 约 125 TFLOPs，与 B100 相差 40 倍，一半来自 ISA | NVIDIA 官网：RTX PRO 6000 FP4 4000 TOPS（稀疏），即约 2 PFLOPS 稠密，188 SM，2.6 GHz；DGX B200 页面 8 卡 144/72 PFLOPS（稀疏/稠密），即单卡 18/9，148 SM，2.1 GHz。差约 4–5 倍；折算到每 SM 每周期约 7 倍 |
 | `blackwell/sm100-vs-sm120` | SMEM 超过 99 KiB 时"申请被悄悄截断、写越界、没有错误码" | `cudaFuncSetAttribute` 返回 `cudaErrorInvalidValue`，超额启动会报启动失败；问题是错误只在运行时出现 |
 | `blackwell/thread-block-clusters` | Hopper 上 16 大小需要"可移植 cluster 大小"选项 | 属性是 `cudaFuncAttributeNonPortableClusterSizeAllowed`（非可移植） |
