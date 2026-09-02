@@ -1,80 +1,80 @@
-# Marlin and friends — INT4 GEMM paths
+# Marlin 及其同类——INT4 GEMM 路径
 
-Older but still relevant: INT4 quantization with FP16 (or BF16) activations. Pre-dates Blackwell; works fine on workstation Blackwell. The path of least resistance for many deployments.
+老一些但仍然有用：INT4 量化配 FP16（或 BF16）激活。早于 Blackwell 出现，在工作站 Blackwell 上工作正常。对很多部署来说，这是阻力最小的路。
 
 ## Marlin
 
-Marlin is a CUDA kernel implementing **W4A16 GEMM** — INT4 weights, FP16 activations, FP16 or FP32 accumulator. Tuned for Ampere (SM80) and works through Blackwell.
+Marlin 是一个实现 **W4A16 GEMM** 的 CUDA kernel——INT4 权重、FP16 激活、FP16 或 FP32 累加器。针对 Ampere（SM80）调优，一路兼容到 Blackwell。
 
-GitHub: `IST-DASLab/marlin`. License: Apache-2.0.
+GitHub：`IST-DASLab/marlin`。协议：Apache-2.0。
 
-### What it does
+### 它做什么
 
-A specialized GEMM where:
+一种特殊的 GEMM：
 
-- Weights are **4-bit integers** with a separate scale factor (typically per-output-channel or per-group)
-- Activations are FP16
-- Tensor Core MMA happens at FP16; weights are dequantized on-the-fly using the per-group scales
-- Output is FP16 accumulator (with an option for FP32)
+- 权重是 **4 位整数**，外加单独的缩放因子（通常按输出通道或按组）
+- 激活是 FP16
+- Tensor Core MMA 以 FP16 进行；权重在计算时用每组的缩放因子即时反量化
+- 输出是 FP16 累加器（可选 FP32）
 
-Throughput at small batch sizes (decode-style workloads) is competitive with FP8 GEMM, with **half the weight memory bandwidth**.
+小 batch（decode 型负载）下的吞吐能和 FP8 GEMM 打平，而**权重占用的内存带宽只有一半**。
 
-### SM compatibility
+### SM 兼容性
 
-| Architecture | Support |
+| 架构 | 支持情况 |
 | --- | --- |
-| Ampere (SM 8.0/8.6/8.9) | full, the design target |
-| Hopper (SM 9.0) | works, ~10–20 % slower than wgmma-FP8 paths |
-| Blackwell DC (SM 10.0) | works, slower than NVFP4 native |
-| Blackwell WS (SM 12.0) | **works**, often the practical fast path |
+| Ampere（SM 8.0/8.6/8.9） | 完整支持，设计目标 |
+| Hopper（SM 9.0） | 可用，比 wgmma-FP8 路径慢约 10–20 % |
+| 数据中心版 Blackwell（SM 10.0） | 可用，比原生 NVFP4 慢 |
+| 工作站版 Blackwell（SM 12.0） | **可用**，往往是实际可行的快速路径 |
 
-On workstation Blackwell, when NVFP4 paths are blocked or buggy (DeepGEMM not ported, CUTLASS NVFP4 hitting SMEM cliff), Marlin is a viable alternative. You pay in slightly larger weights (~4 bits → ~4.25 bits with metadata vs NVFP4's 4.5 bits — actually slightly *smaller*) and slightly less accuracy on certain models.
+在工作站 Blackwell 上，当 NVFP4 路径走不通或有 bug 时（DeepGEMM 没移植、CUTLASS NVFP4 撞上 SMEM 断崖），Marlin 是一个可行的替代。代价是权重略大一点（含元数据约 4 位 → 约 4.25 位，对比 NVFP4 的 4.5 位——其实反而略*小*），以及在某些模型上精度略低。
 
-### Common failures
+### 常见故障
 
-- **Group-size mismatch**: Marlin is sensitive to the group size used during quantization (typically 128 or 64). Loading a model quantized at one group size with a kernel expecting a different group size produces wrong outputs.
-- **Activation precision mismatch**: feeding BF16 activations into a Marlin kernel that expects FP16 produces NaN-filled output (FP16 max is ~65 504; BF16 has wider range).
+- **组大小不匹配**：Marlin 对量化时用的组大小（通常是 128 或 64）很敏感。用一个组大小量化的模型，交给期望另一个组大小的 kernel 加载，输出就是错的。
+- **激活精度不匹配**：把 BF16 激活喂给期望 FP16 的 Marlin kernel，输出会满是 NaN（FP16 最大值约 65 504，BF16 的范围更宽）。
 
-## AWQ — Activation-aware Weight Quantization
+## AWQ——激活感知的权重量化
 
-A *quantization scheme*, not a kernel — but it ships with kernels. AWQ uses the magnitude of activations to choose which weight columns to quantize aggressively vs preserve in FP16. Empirically: better accuracy than naive INT4 quantization at the same bitrate.
+这是一种*量化方案*，不是 kernel——但它附带 kernel。AWQ 根据激活的幅度来决定哪些权重列可以激进地量化、哪些要保留在 FP16。经验上，同样的比特率下，精度比朴素的 INT4 量化更好。
 
-The AWQ kernel uses similar techniques to Marlin (W4A16) but with the activation-aware quantization metadata.
+AWQ 的 kernel 用的技术和 Marlin（W4A16）类似，只是带上了激活感知量化的元数据。
 
-GitHub: `mit-han-lab/llm-awq`. Works on SM80–SM120.
+GitHub：`mit-han-lab/llm-awq`。支持 SM80–SM120。
 
-## GPTQ — Gradient-based Post-Training Quantization
+## GPTQ——基于梯度的训练后量化
 
-Another quantization scheme. Uses second-order gradient information from a calibration dataset to optimize per-weight rounding. Typically better than naive RTN (round-to-nearest) but slower to compute.
+另一种量化方案。利用校准数据集上的二阶梯度信息来优化每个权重的舍入。通常比朴素的 RTN（就近舍入）效果更好，但计算更慢。
 
-The GPTQ format is a target for many kernels; both Marlin and ExLlama (another inference library) have GPTQ-format readers.
+GPTQ 格式是很多 kernel 的目标格式；Marlin 和 ExLlama（另一个推理库）都有 GPTQ 格式的读取器。
 
-GitHub: `IST-DASLab/gptq` and downstream. Works on SM80–SM120.
+GitHub：`IST-DASLab/gptq` 及其下游。支持 SM80–SM120。
 
-## Where these fit in the stack
+## 它们在整个栈里的位置
 
-For workstation Blackwell users, the realistic options for serving a large model:
+对工作站 Blackwell 用户来说，部署大模型的现实选项有：
 
-1. **NVFP4 + CUTLASS**: best throughput when it works. Hits SMEM cliff for some kernels.
-2. **NVFP4 + DeepGEMM**: not yet ported to SM120 (as of early 2026).
-3. **NVFP4 + FlashInfer**: works for non-MoE-a2a paths.
-4. **W4A16 + Marlin/AWQ/GPTQ**: lower throughput than NVFP4 (Tensor Core is at FP16 peak, not FP4 peak), but works reliably.
-5. **FP8 + CUTLASS**: 2× weight memory vs NVFP4, but no SMEM cliff and broader kernel support.
+1. **NVFP4 + CUTLASS**：能跑起来的时候吞吐最好。部分 kernel 会撞上 SMEM 断崖。
+2. **NVFP4 + DeepGEMM**：尚未移植到 SM120（截至 2026 年初）。
+3. **NVFP4 + FlashInfer**：不涉及 MoE all-to-all 的路径可用。
+4. **W4A16 + Marlin/AWQ/GPTQ**：吞吐低于 NVFP4（Tensor Core 跑在 FP16 峰值而非 FP4 峰值），但稳定可靠。
+5. **FP8 + CUTLASS**：权重内存是 NVFP4 的 2 倍，但没有 SMEM 断崖，kernel 支持也更广。
 
-The choice is often dictated by model availability — if a model only ships in NVFP4 form, you can't trivially convert to W4A16. Conversely, many community-quantized models exist as GPTQ/AWQ artifacts and play nicely with Marlin.
+选哪个往往由模型有什么格式决定——如果一个模型只发布了 NVFP4 版本，你没法轻易转成 W4A16。反过来，社区量化的模型很多是 GPTQ/AWQ 格式，和 Marlin 配合得很好。
 
-## Other formats worth knowing
+## 其他值得了解的格式
 
-- **EXL2 / EXL3** (ExLlama): community-popular custom formats, mixed precision per layer
-- **bitsandbytes (NF4)**: HuggingFace integration, used in LoRA training
-- **OpenCompute MX-INT4 / MX-INT8**: structured formats analogous to MX-FP4
+- **EXL2 / EXL3**（ExLlama）：社区流行的自定义格式，逐层混合精度
+- **bitsandbytes（NF4）**：集成在 HuggingFace 里，LoRA 训练常用
+- **OpenCompute MX-INT4 / MX-INT8**：与 MX-FP4 类似的结构化格式
 
-For most production inference on workstation Blackwell, **GPTQ-formatted W4A16 via Marlin** is the simplest viable path. It's not the fastest, but it works.
+在工作站 Blackwell 上做生产推理，**通过 Marlin 跑 GPTQ 格式的 W4A16** 是最简单的可行路径。不是最快的，但能用。
 
-## See also
+## 另见
 
-- [`fundamentals/number-formats`](../fundamentals/number-formats.md) — the broader format landscape
-- [`blackwell/nvfp4-deep-dive`](../blackwell/nvfp4-deep-dive.md) — the NVFP4 alternative
-- *Frantar et al., "GPTQ"* (2023)
-- *Lin et al., "AWQ"* (2024)
-- `IST-DASLab/marlin` on GitHub
+- [`fundamentals/number-formats`](../fundamentals/number-formats.md)——更全面的格式全景
+- [`blackwell/nvfp4-deep-dive`](../blackwell/nvfp4-deep-dive.md)——NVFP4 这个替代选项
+- *Frantar et al., "GPTQ"*（2023）
+- *Lin et al., "AWQ"*（2024）
+- GitHub 上的 `IST-DASLab/marlin`

@@ -1,49 +1,49 @@
 # Blackwell
 
-NVIDIA's GPU generation released 2024–2026. This section covers the architectural details that distinguish Blackwell from preceding generations, and (more importantly) that distinguish the **two halves of Blackwell** from each other.
+NVIDIA 在 2024–2026 年间推出的 GPU 世代。本节介绍 Blackwell 与前几代架构的差异，更重要的是，介绍 **Blackwell 的两个分支**彼此之间的差异。
 
-## Pages in this section
+## 本节页面
 
-- [`sm100-vs-sm120`](sm100-vs-sm120.md) — the architectural split, in detail
-- [`tcgen05-and-tmem`](tcgen05-and-tmem.md) — the new Tensor Core ISA family (datacenter only)
-- [`thread-block-clusters`](thread-block-clusters.md) — multi-CTA cooperation, what works on each half
-- [`nvfp4-deep-dive`](nvfp4-deep-dive.md) — NVIDIA's FP4 variant, native on both halves
+- [`sm100-vs-sm120`](sm100-vs-sm120.md) —— 两个分支的架构差异，详细版
+- [`tcgen05-and-tmem`](tcgen05-and-tmem.md) —— 新的 Tensor Core 指令族（仅数据中心版）
+- [`thread-block-clusters`](thread-block-clusters.md) —— 多 CTA 协作，两个分支各能用什么
+- [`nvfp4-deep-dive`](nvfp4-deep-dive.md) —— NVIDIA 自己的 FP4 变体，两个分支都原生支持
 
-## What's not here
+## 不在本节的内容
 
-- **General Tensor Core background**: in [`fundamentals/tensor-cores`](../fundamentals/tensor-cores.md).
-- **NVFP4 against the broader number-format landscape**: in [`fundamentals/number-formats`](../fundamentals/number-formats.md).
-- **Interconnect and MoE**: in [`interconnect/`](../interconnect/index.md). NVLink is technically a Blackwell-generation feature too, but the conceptual unit is interconnect, so it lives in its own section.
+- **Tensor Core 的通用背景**：见 [`fundamentals/tensor-cores`](../fundamentals/tensor-cores.md)。
+- **NVFP4 在整个数值格式版图里的位置**：见 [`fundamentals/number-formats`](../fundamentals/number-formats.md)。
+- **互连与 MoE**：见 [`interconnect/`](../interconnect/index.md)。严格说 NVLink 也是 Blackwell 这一代的特性，但它在概念上属于互连，所以单独成节。
 
-## The map
+## 全景图
 
 ```mermaid
 graph TD
-    Blackwell["Blackwell generation"]
-    Blackwell --> DC["Datacenter SM 10.0<br/>GB100, GB200, GB300"]
-    Blackwell --> WS["Workstation SM 12.0<br/>GB202: RTX PRO 6000 W., RTX 5090"]
+    Blackwell["Blackwell 世代"]
+    Blackwell --> DC["数据中心版 SM 10.0<br/>GB100、GB200、GB300"]
+    Blackwell --> WS["工作站版 SM 12.0<br/>GB202：RTX PRO 6000 W.、RTX 5090"]
 
-    DC --> DC_features["• tcgen05.* family<br/>• Tensor Memory (TMEM)<br/>• Cluster size up to 16<br/>• 228 KiB SMEM/block<br/>• HBM3e<br/>• NVLink 5"]
+    DC --> DC_features["• tcgen05.* 指令族<br/>• Tensor Memory（TMEM）<br/>• cluster 最大 16<br/>• 每 block 228 KiB SMEM<br/>• HBM3e<br/>• NVLink 5"]
 
-    WS --> WS_features["• mma.sync + wgmma.async only<br/>• No TMEM<br/>• Cluster size 1 only<br/>• 99 KiB SMEM/block<br/>• GDDR7<br/>• PCIe Gen5 only"]
+    WS --> WS_features["• 只有 mma.sync + wgmma.async<br/>• 无 TMEM<br/>• cluster 只能为 1<br/>• 每 block 99 KiB SMEM<br/>• GDDR7<br/>• 只有 PCIe Gen5"]
 
-    Both["Common to both"]
-    Both --> Both_features["• Tensor Core gen 5<br/>• NVFP4 / MX-FP4 native<br/>• FP6, FP8 native<br/>• Same driver, same toolkit<br/>• Same PTX major version 8"]
+    Both["两者共有"]
+    Both --> Both_features["• 第 5 代 Tensor Core<br/>• 原生 NVFP4 / MX-FP4<br/>• 原生 FP6、FP8<br/>• 同一驱动、同一工具包<br/>• PTX 主版本同为 8"]
 
     DC -.- Both
     WS -.- Both
 ```
 
-## Reading order
+## 阅读顺序
 
-Read [`sm100-vs-sm120`](sm100-vs-sm120.md) first — it's the central page, listing every architectural difference with citations to the next-level pages. Then read whichever sub-pages you need based on the differences that matter to your work.
+先读 [`sm100-vs-sm120`](sm100-vs-sm120.md)——它是核心页面，列出了每一项架构差异，并指向更深入的子页面。然后根据你工作中真正相关的差异，按需读对应的子页面。
 
-## Why the split exists (briefly)
+## 为什么会分成两支（简述）
 
-NVIDIA chose to separate datacenter and consumer Blackwell into different silicon families for several reasons that show up indirectly:
+NVIDIA 把数据中心版和消费级 Blackwell 分成两个不同的芯片家族，原因有几条，都能从侧面看出来：
 
-- **Die area economics**: TMEM, large NVLink bridges, and HBM controllers are expensive in mm². A consumer card that includes them is harder to price competitively.
-- **Workload differences**: consumer Blackwell targets visualization, content creation, and small-scale ML. The cost-of-feature tradeoff for `tcgen05` (only useful for very large MMAs) is poor at consumer scale.
-- **Product segmentation**: NVIDIA wants the datacenter-class features to remain a paying-customer feature.
+- **芯片面积的经济账**：TMEM、大规模 NVLink 桥接、HBM 控制器都很吃 mm²。消费卡要是把这些都塞进去，定价就很难有竞争力。
+- **负载不同**：消费级 Blackwell 面向可视化、内容创作和小规模 ML。`tcgen05` 只对非常大的 MMA 才有用，在消费级这个规模上，为它付出的代价不划算。
+- **产品分级**：NVIDIA 希望数据中心级的特性留给付费客户。
 
-This is **not new** — Volta and Turing were similarly split, as were Ampere (A100 datacenter vs RTX 30) and Hopper (H100 vs there's-no-consumer-Hopper-because-Lovelace-took-that-slot). The Blackwell split is unusual mainly because the **product names** sit very close to each other in NVIDIA's lineup. The "RTX PRO 6000 Blackwell" brand alone has Server Edition, Workstation Edition, and Max-Q variants — *all SM120* (GB202) — while "B200" / "GB200" / "GB300" are the SM100 (datacenter) parts. Buyers occasionally assume that a "Server Edition" card or a 96 GB sticker means SM100; both signals are misleading.
+这**并不新鲜**——Volta 和 Turing 就是这样分的，Ampere（数据中心版 A100 对 RTX 30）和 Hopper（H100 对……没有消费级 Hopper，因为那个位置被 Lovelace 占了）也一样。Blackwell 这次分家之所以特别，主要是因为 NVIDIA 产品线里两边的**产品名**挨得太近。光是“RTX PRO 6000 Blackwell”这一个品牌就有 Server Edition、Workstation Edition 和 Max-Q 三种变体，*全是 SM120*（GB202）；而“B200”/“GB200”/“GB300”才是 SM100（数据中心版）产品。买家偶尔会以为“Server Edition”或者 96 GB 的标签就意味着 SM100，这两个信号都靠不住。

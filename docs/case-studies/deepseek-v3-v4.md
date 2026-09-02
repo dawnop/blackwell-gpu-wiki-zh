@@ -1,122 +1,122 @@
-# DeepSeek-V3 and V4
+# DeepSeek-V3 与 V4
 
-The canonical "designed for NVL72, breaks on consumer Blackwell" model family. DeepSeek-V3 (Dec 2024), V3.1, V4 (Q1 2026), V4-Flash (Q2 2026) — all share a similar profile.
+"为 NVL72 而设计、在消费级 Blackwell 上跑不起来"的最典型模型系列。DeepSeek-V3（2024 年 12 月）、V3.1、V4（2026 年 Q1）、V4-Flash（2026 年 Q2）——几款的情况都差不多。
 
-## The model
+## 模型本身
 
 | | DeepSeek-V3 | DeepSeek-V4 | DeepSeek-V4-Flash |
 | --- | --- | --- | --- |
-| Total parameters | 671 B | ~700 B | ~250 B |
-| Active per token | 37 B | ~40 B | ~25 B |
-| Architecture | MoE with shared + routed experts | MoE, refined routing | MoE, latency-optimized |
-| Number of experts | 256 routed + 1 shared | 256 routed + 1 shared | 64 routed |
-| Top-k routing | 8 | 8 | 4 |
-| Hidden dim | 7168 | 7168 | 5120 |
-| Layers | 61 | ~80 | ~40 |
-| Native quantization | FP8 | NVFP4 | NVFP4 |
-| Attention | MLA (Multi-head Latent Attention) | MLA | MLA |
+| 总参数 | 671 B | ~700 B | ~250 B |
+| 每 token 激活参数 | 37 B | ~40 B | ~25 B |
+| 架构 | MoE，共享专家 + 路由专家 | MoE，路由有改进 | MoE，面向低延迟优化 |
+| 专家数 | 256 路由 + 1 共享 | 256 路由 + 1 共享 | 64 路由 |
+| Top-k 路由 | 8 | 8 | 4 |
+| 隐层维度 | 7168 | 7168 | 5120 |
+| 层数 | 61 | ~80 | ~40 |
+| 原生量化格式 | FP8 | NVFP4 | NVFP4 |
+| Attention | MLA（Multi-head Latent Attention） | MLA | MLA |
 
-DeepSeek's signature is **MLA** (Multi-head Latent Attention) — a low-rank attention variant that reduces KV cache size by ~6× compared to standard MHA. Plus their MoE: aggressive top-k=8 routing into 256 experts.
+DeepSeek 的标志是 **MLA**（Multi-head Latent Attention）——一种低秩 attention 变体，KV cache 比标准 MHA 小约 6 倍。再加上它的 MoE：激进的 top-k=8 路由，分到 256 个专家上。
 
-## What the reference deployment assumes
+## 参考部署默认了什么
 
-DeepSeek's published reference deployment for V3/V4 targets:
+DeepSeek 为 V3/V4 发布的参考部署面向：
 
-- **Hardware**: 8× H100 / H200 (DGX) or 16+ × B100/B200 (HGX or NVL72)
-- **GEMM**: DeepGEMM (their own library), targeting `sm_100a` for Blackwell
-- **Attention**: FlashInfer with custom MLA-aware kernels
-- **MoE all-to-all**: DeepEP intranode (NVSHMEM over NVLink) for in-chassis, DeepEP internode (RDMA) for cross-node
-- **Parallelism**: EP-heavy (each expert lives on a small group of GPUs), with TP within each expert and PP across model layers
-- **Inference engine**: vLLM or sglang (their own forks)
+- **硬件**：8× H100 / H200（DGX），或 16 张以上的 B100/B200（HGX 或 NVL72）
+- **GEMM**：DeepGEMM（他们自己的库），Blackwell 上编译目标是 `sm_100a`
+- **Attention**：FlashInfer，带针对 MLA 定制的 kernel
+- **MoE all-to-all**：机箱内用 DeepEP intranode（NVSHMEM 走 NVLink），跨节点用 DeepEP internode（RDMA）
+- **并行方式**：以 EP 为主（每个专家放在一小组 GPU 上），专家内部用 TP，模型层之间用 PP
+- **推理引擎**：vLLM 或 sglang（他们自己的分支）
 
-The whole stack is engineered for **EP across NVLink-class fabrics**. Three of the four major dependencies (DeepGEMM `tcgen05`, DeepEP NVSHMEM, FlashInfer NVFP4 GEMM) assume datacenter Blackwell; one (DeepEP NVSHMEM) assumes NVLink.
+整套栈都是为**跑在 NVLink 级别 fabric 上的 EP** 设计的。四个主要依赖里有三个（DeepGEMM 的 `tcgen05`、DeepEP 的 NVSHMEM、FlashInfer 的 NVFP4 GEMM）默认数据中心版 Blackwell，其中一个（DeepEP NVSHMEM）还默认有 NVLink。
 
-## What breaks on workstation Blackwell
+## 在工作站 Blackwell 上哪里会坏
 
-In rough order of severity:
+大致按严重程度排序：
 
-### 1. DeepGEMM doesn't run
+### 1. DeepGEMM 跑不起来
 
-DeepGEMM cubins are `sm_100a` only. Loading them on SM120 fails with "no kernel image."
+DeepGEMM 的 cubin 只有 `sm_100a` 版本。在 SM120 上加载会报"no kernel image"。
 
-Fix: substitute CUTLASS NVFP4 GEMM. Inference engines have a `disable_deepgemm` flag.
+解决：换成 CUTLASS 的 NVFP4 GEMM。推理引擎都有 `disable_deepgemm` 开关。
 
-### 2. DeepEP intranode requires NVLink, internode requires RDMA
+### 2. DeepEP intranode 要 NVLink，internode 要 RDMA
 
-Neither is present on a typical workstation Blackwell rig. DeepEP refuses to initialize.
+典型的工作站 Blackwell 机器两样都没有。DeepEP 会直接拒绝初始化。
 
-Fix: don't use DeepEP. Configure the inference engine for TP-only.
+解决：不用 DeepEP。把推理引擎配成只用 TP。
 
-### 3. EP plan over PCIe is unviable
+### 3. 走 PCIe 的 EP 方案根本不可行
 
-Even with NCCL fallback all-to-all, EP=N over PCIe Gen4 is bandwidth-bound. For a model with 80 layers and 8-way EP, decode at PCIe speed is on the order of 1–2 tok/s.
+就算用 NCCL 回退的 all-to-all，EP=N 在 PCIe Gen4 上也会被带宽卡死。一个 80 层、8 路 EP 的模型，按 PCIe 的速度 decode 大约只有 1–2 tok/s。
 
-Fix: use TP=4 (or whatever your GPU count is) instead of EP. This means each GPU holds **all expert weights** but only processes its TP-slice. Memory cost: experts must fit in `total_VRAM / N` per GPU.
+解决：用 TP=4（或者你有几张卡就几路）代替 EP。这意味着每张 GPU 都要持有**全部专家权重**，但只算自己那份 TP 切片。内存代价：每张 GPU 上的专家权重必须塞进 `total_VRAM / N`。
 
-### 4. FlashInfer one-shot MoE a2a needs P2P atomics
+### 4. FlashInfer 的 one-shot MoE a2a 需要 P2P 原子操作
 
-If you do try EP with FlashInfer's optimized a2a kernel, it busy-polls on completion atomics that aren't enabled.
+如果你非要用 FlashInfer 优化过的 a2a kernel 来跑 EP，它会在完成标志的原子变量上忙等，而这些原子操作根本没开。
 
-Fix: same as 3.
+解决：同第 3 条。
 
-### 5. NVFP4 scale layout
+### 5. NVFP4 缩放因子布局
 
-DeepSeek's V4 NVFP4 weights use one specific scale layout. Loading them through a kernel expecting MX-FP4 or differently-laid-out NVFP4 produces silent garbage.
+DeepSeek V4 的 NVFP4 权重用的是一种特定的缩放因子布局。如果加载它的 kernel 期望的是 MX-FP4，或者是另一种布局的 NVFP4，输出会是一堆无声的垃圾。
 
-Fix: ensure inference engine's quantization config matches the artifact (check `quantization_config.json` in the model directory and the engine's loader).
+解决：确认推理引擎的量化配置和权重文件一致（检查模型目录里的 `quantization_config.json` 以及引擎的加载器）。
 
-### 6. MLA's KV cache quirks
+### 6. MLA 的 KV cache 特殊之处
 
-MLA stores keys and values as low-rank latent vectors that get expanded just-in-time. The expansion kernel has `tcgen05` paths in the reference implementation.
+MLA 把 key 和 value 存成低秩的潜向量，用的时候才即时展开。参考实现里这个展开 kernel 有 `tcgen05` 路径。
 
-Fix: most inference engines have a `mma.sync`-based MLA expansion kernel (the original DeepSeek-V2 paper's reference C++ implementation). It works on SM120, just slower.
+解决：大多数推理引擎都有基于 `mma.sync` 的 MLA 展开 kernel（就是 DeepSeek-V2 论文附带的 C++ 参考实现）。它在 SM120 上能跑，只是慢一些。
 
-## What works on workstation Blackwell
+## 在工作站 Blackwell 上什么能用
 
-A working configuration:
+一套能跑的配置：
 
 ```yaml
-# Conceptually — translate to your engine's flag syntax
+# 示意写法——请换成你的引擎的参数语法
 weights: NVFP4 (DeepSeek's published artifacts)
 kv_cache: FP8 E4M3
 attention: Triton-based with kv_splits=64
 parallelism:
   tensor_parallel: 4 (= number of GPUs)
   pipeline_parallel: 1
-  expert_parallel: 1     # disable EP
-gemm_backend: cutlass    # not deepgemm
-moe_runner: cutlass      # not flashinfer one-shot
+  expert_parallel: 1     # 关掉 EP
+gemm_backend: cutlass    # 不用 deepgemm
+moe_runner: cutlass      # 不用 flashinfer one-shot
 ```
 
-For the V4-Flash variant (250 B parameters, 64 experts), this fits comfortably in 4× 96 GB workstation Blackwell with room for ~32k context KV cache. For full V4 (700 B), you'd need pruning (REAP-style) to bring the parameter count down to ~478 B before NVFP4-quantization makes it fit.
+V4-Flash（250 B 参数，64 个专家）用这套配置能轻松塞进 4× 96 GB 的工作站 Blackwell，还能留出约 32k 上下文的 KV cache 空间。完整的 V4（700 B）则需要先做剪枝（REAP 那种），把参数量降到约 478 B，再做 NVFP4 量化才放得下。
 
-## Performance expectations
+## 性能预期
 
-On a 4× workstation Blackwell rig, with the workaround configuration:
+在 4 张工作站 Blackwell 上，用上面的变通配置：
 
-| Model | Expected decode tok/s |
+| 模型 | 预期 decode tok/s |
 | --- | ---: |
-| V4-Flash | 50–80 (smaller model, fits comfortably) |
-| V4 (after REAP pruning) | 20–50 (varies with context length) |
-| V3 (FP8 weights, no pruning) | 10–30 (FP8 weights are larger than V4's NVFP4) |
+| V4-Flash | 50–80（模型小，放得宽裕） |
+| V4（REAP 剪枝后） | 20–50（随上下文长度变化） |
+| V3（FP8 权重，不剪枝） | 10–30（FP8 权重比 V4 的 NVFP4 大） |
 
-Compared to a B100 deployment of V4 at ~200 tok/s on similar hardware count, this is roughly **5–10× slower**. The gap is partly hardware (memory bandwidth, SM count) and partly the lack of optimal kernels (`tcgen05`-based vs `mma.sync`-based GEMM).
+对比同等卡数的 B100 部署 V4 大约 200 tok/s，这里大约**慢 5–10 倍**。差距一部分来自硬件（显存带宽、SM 数量），一部分来自没有最优 kernel（基于 `tcgen05` 的 GEMM 对比基于 `mma.sync` 的 GEMM）。
 
-## What's special about DeepSeek
+## DeepSeek 特殊在哪
 
-A few things that make DeepSeek the canonical "doesn't run on consumer Blackwell" example:
+几点让 DeepSeek 成为"消费级 Blackwell 跑不了"的典型代表：
 
-1. **They wrote their own GEMM library** (DeepGEMM) and made it `sm_100a`-only. Most labs use CUTLASS, which has both targets.
-2. **MLA is unusual.** Most attention kernels in the wild are standard MHA / GQA; MLA needs special kernel paths that not every library provides.
-3. **The model is huge.** Even with NVFP4 you're squeezing every byte.
-4. **Reference docs assume datacenter.** Their setup guides have step-by-step instructions for DGX H100; nothing for workstation cards.
+1. **他们自己写了 GEMM 库**（DeepGEMM），而且只编 `sm_100a`。大多数实验室用 CUTLASS，两个目标都有。
+2. **MLA 不常见。**外面的 attention kernel 大多是标准 MHA / GQA；MLA 需要专门的 kernel 路径，不是每个库都提供。
+3. **模型太大。**即使用 NVFP4 也得一个字节一个字节地抠。
+4. **参考文档默认数据中心环境。**他们的部署指南有 DGX H100 的逐步说明，工作站卡则一个字没有。
 
-If you can run DeepSeek V4 on workstation Blackwell, you can probably run anything.
+如果你能在工作站 Blackwell 上跑起 DeepSeek V4，那大概什么模型都能跑了。
 
-## See also
+## 另见
 
-- [`kimi-k2`](kimi-k2.md) — similar profile, different team
-- [`glm-5`](glm-5.md) — less reliant on `tcgen05`, easier port
-- [`compatibility/`](../compatibility/index.md) — general patterns for the workarounds
-- DeepSeek-V3 and V4 technical reports
-- `deepseek-ai/DeepGEMM`, `deepseek-ai/DeepEP` on GitHub
+- [`kimi-k2`](kimi-k2.md) —— 情况类似，另一个团队
+- [`glm-5`](glm-5.md) —— 对 `tcgen05` 依赖更轻，更容易移植
+- [`compatibility/`](../compatibility/index.md) —— 各种变通方法的通用套路
+- DeepSeek-V3 和 V4 技术报告
+- GitHub 上的 `deepseek-ai/DeepGEMM`、`deepseek-ai/DeepEP`

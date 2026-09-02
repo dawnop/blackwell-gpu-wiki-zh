@@ -1,14 +1,14 @@
-# Interconnect and parallelism
+# 互连与并行
 
-How GPUs talk to each other, and why this dominates the performance story for MoE inference. Workstation Blackwell's lack of NVLink is the second-most consequential constraint after the SM ISA split.
+GPU 之间怎么通信，以及为什么这件事决定了 MoE 推理的性能上限。工作站 Blackwell 没有 NVLink，这是仅次于 SM ISA 分裂的第二大限制。
 
-## Pages in this section
+## 本节页面
 
-- [`nvlink-vs-pcie`](nvlink-vs-pcie.md) — bandwidth, latency, and topology
-- [`p2p-and-atomics`](p2p-and-atomics.md) — peer-to-peer features and the atomics blocker
-- [`moe-parallelism`](moe-parallelism.md) — TP, PP, EP, and when each wins
+- [`nvlink-vs-pcie`](nvlink-vs-pcie.md) —— 带宽、延迟与拓扑
+- [`p2p-and-atomics`](p2p-and-atomics.md) —— P2P 特性与原子操作这道坎
+- [`moe-parallelism`](moe-parallelism.md) —— TP、PP、EP 各自什么时候占优
 
-## The headline numbers
+## 关键数字
 
 ```mermaid
 graph LR
@@ -19,48 +19,48 @@ graph LR
     NVL --> NVS --> P5 --> P4
 ```
 
-The bandwidth gap between datacenter NVLink and consumer PCIe is roughly **30–55×**. For most kernels (compute-bound dense matmul), this doesn't matter — the bandwidth is between GPUs but the work happens within them. For MoE all-to-all, this is the dominant performance number.
+数据中心 NVLink 和消费级 PCIe 之间的带宽差距大约是 **30–55 倍**。对大多数 kernel（算力受限的稠密矩阵乘）来说这无关紧要——带宽是 GPU 之间的事，而计算发生在 GPU 内部。但对 MoE 的 all-to-all 来说，这就是决定性能的那个数字。
 
-## Why it matters for MoE
+## 为什么对 MoE 很重要
 
-A MoE layer with N experts and top-k routing has the following data flow per token:
+一个有 N 个专家、top-k 路由的 MoE 层，每个 token 的数据流是：
 
-1. Compute routing scores (small)
-2. Dispatch token's hidden state to k experts (= cross-GPU send if experts live elsewhere)
-3. Each expert runs its FFN
-4. Combine k outputs back into the token's GPU (cross-GPU recv)
+1. 计算路由分数（很小）
+2. 把 token 的隐状态 dispatch 到 k 个专家（专家在别的 GPU 上就意味着跨 GPU 发送）
+3. 每个专家跑自己的 FFN
+4. 把 k 个输出 combine 回 token 所在的 GPU（跨 GPU 接收）
 
-For Expert Parallelism (EP) where N experts are split across N GPUs, steps 2 and 4 are **all-to-all** operations whose volume scales with `N × hidden_size × tokens_per_step`. For a model like DeepSeek-V3 (N=256, hidden=7168, batch≈64), this is on the order of **gigabytes per step**.
+在专家并行（EP）下，N 个专家分布在 N 张 GPU 上，第 2 步和第 4 步都是 **all-to-all** 操作，数据量随 `N × hidden_size × tokens_per_step` 增长。以 DeepSeek-V3 这类模型（N=256，hidden=7168，batch≈64）为例，每步的量在 **GB 量级**。
 
-On NVLink: the all-to-all completes in microseconds.
-On PCIe: it takes hundreds of microseconds to milliseconds.
+NVLink 上：all-to-all 微秒级完成。
+PCIe 上：几百微秒到几毫秒。
 
-For decode (where each step produces 1 token), this directly increases per-token latency. Throughput collapses by 30–50×.
+对 decode（每步只产出 1 个 token）来说，这直接抬高了每 token 的延迟。吞吐会掉 30–50 倍。
 
-## Why it doesn't matter for non-MoE
+## 为什么对非 MoE 模型无所谓
 
-Dense models (Llama, Mistral, GLM-4) use **only Tensor Parallelism (TP)** for multi-GPU serving. TP requires only an `all_reduce` per layer (not all-to-all), and the volume is much smaller (proportional to sequence length, not vocabulary). PCIe Gen4 is sufficient for TP with minimal slowdown.
+稠密模型（Llama、Mistral、GLM-4）做多 GPU 服务时**只用张量并行（TP）**。TP 每层只需要一次 `all_reduce`（不是 all-to-all），数据量也小得多（正比于序列长度，而不是词表大小）。PCIe Gen4 跑 TP 完全够用，几乎没有减速。
 
-So the workstation-Blackwell "interconnect penalty" is **MoE-specific**, not general.
+所以工作站 Blackwell 的"互连惩罚"是 **MoE 特有的**，不是普遍问题。
 
-## What you can do about it
+## 能做什么
 
-Three approaches:
+三条路：
 
-### 1. Avoid the all-to-all entirely
+### 1. 彻底避开 all-to-all
 
-Use TP+PP instead of EP. Each GPU stores all experts (memory cost) but the all-to-all becomes a permutation within a single GPU. See [`moe-parallelism`](moe-parallelism.md).
+用 TP+PP 代替 EP。每张 GPU 存全部专家（付出内存代价），但 all-to-all 变成了单 GPU 内部的一次置换。见 [`moe-parallelism`](moe-parallelism.md)。
 
-### 2. Optimize the all-to-all
+### 2. 优化 all-to-all
 
-Use NCCL `all_to_all_single` instead of NVSHMEM-based one-shot. Slower than the optimal datacenter path, but avoids the atomics blocker. See [`p2p-and-atomics`](p2p-and-atomics.md).
+用 NCCL 的 `all_to_all_single` 替代基于 NVSHMEM 的 one-shot 实现。比数据中心的最优路径慢，但绕开了原子操作这道坎。见 [`p2p-and-atomics`](p2p-and-atomics.md)。
 
-### 3. Accept the cost
+### 3. 接受代价
 
-For some applications (offline batched inference, low concurrency, models small enough that overall throughput is fine), the EP-on-PCIe path is acceptable even at reduced speed.
+有些场景（离线批量推理、低并发、模型小到整体吞吐够用）即便速度打折，EP 跑在 PCIe 上也能接受。
 
-In practice, **option 1 is what most workstation Blackwell deployments choose** — for both architectural cleanliness and because the other options come with their own gotchas.
+实践中，**大多数工作站 Blackwell 部署选的是第 1 条**——一方面架构上更干净，另一方面另外两条路各有各的坑。
 
-## Reading order
+## 阅读顺序
 
-[`nvlink-vs-pcie`](nvlink-vs-pcie.md) first for the topology numbers, then [`p2p-and-atomics`](p2p-and-atomics.md) for the technical detail of why "PCIe is slower" turns into "PCIe doesn't work" in some cases, then [`moe-parallelism`](moe-parallelism.md) for how to redesign around the constraint.
+先看 [`nvlink-vs-pcie`](nvlink-vs-pcie.md) 了解拓扑数字；再看 [`p2p-and-atomics`](p2p-and-atomics.md)，弄清为什么"PCIe 比较慢"在某些情况下会变成"PCIe 根本跑不了"；最后看 [`moe-parallelism`](moe-parallelism.md)，看怎么绕着这个限制重新设计。

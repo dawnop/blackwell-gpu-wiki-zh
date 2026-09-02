@@ -1,40 +1,40 @@
-# GPU execution model
+# GPU 执行模型
 
-How NVIDIA GPUs execute kernels. The hierarchy from kernel launch down to individual lanes, and the SIMT (Single Instruction, Multiple Threads) abstraction that ties it together.
+NVIDIA GPU 怎样执行 kernel。从 kernel 启动一路到单个 lane 的层级结构，以及把它们串在一起的 SIMT（Single Instruction, Multiple Threads，单指令多线程）抽象。
 
-## The hierarchy
+## 层级结构
 
 ```
-Kernel launch
-  └── Grid                     — collection of CTAs (Cooperative Thread Arrays)
-        └── CTA / "Block"       — collection of warps; lives on a single SM
-              └── Warp           — 32 threads, executes in lock-step
-                    └── Thread   — one logical execution lane
+Kernel 启动
+  └── Grid                     — 一组 CTA（Cooperative Thread Array，协作线程数组）
+        └── CTA / "Block"       — 一组 warp；整体驻留在一个 SM 上
+              └── Warp           — 32 个线程，锁步执行
+                    └── Thread   — 一条逻辑执行 lane
 ```
 
-A **kernel** is a function callable from host (CPU) code. Launching a kernel means specifying a grid shape (how many CTAs) and a block shape (how many threads per CTA), then enqueueing the call onto a CUDA stream. The driver routes the kernel to the device, the device's SMs claim CTAs as resources allow, and execution proceeds.
+**kernel** 是一个可以从主机（CPU）代码调用的函数。启动 kernel 就是指定 grid 形状（多少个 CTA）和 block 形状（每个 CTA 多少线程），然后把这次调用排进一条 CUDA 流。驱动把 kernel 送到设备，设备上的 SM 按资源余量领取 CTA，执行随即展开。
 
-| Term | What it is | Typical size |
+| 术语 | 是什么 | 典型大小 |
 | --- | --- | --- |
-| **Grid** | The full launch | up to 2³¹−1 CTAs |
-| **CTA / Block** | A scheduled unit, lives on one SM | 32–1024 threads |
-| **Warp** | The execution unit | exactly 32 threads, always |
-| **Thread / Lane** | One logical instruction stream | 1 |
+| **Grid** | 一次完整的启动 | 最多 2³¹−1 个 CTA |
+| **CTA / Block** | 调度单位，驻留在一个 SM 上 | 32–1024 个线程 |
+| **Warp** | 执行单位 | 永远恰好 32 个线程 |
+| **Thread / Lane** | 一条逻辑指令流 | 1 |
 
-Two terms are used interchangeably:
-- **CTA** (Cooperative Thread Array) — NVIDIA's formal term
-- **Block** — the term used in CUDA C++ (`__syncthreads()` syncs a block, etc.)
+有两个术语可以互换使用：
+- **CTA**（Cooperative Thread Array）— NVIDIA 的正式叫法
+- **Block** — CUDA C++ 里的叫法（`__syncthreads()` 同步的是一个 block，等等）
 
-## Streaming multiprocessors (SMs)
+## 流式多处理器（SM）
 
-A GPU is a collection of **SMs** (Streaming Multiprocessors). Each SM:
+一块 GPU 就是一堆 **SM**（Streaming Multiprocessor，流式多处理器）。每个 SM：
 
-- Has its own registers, shared memory (SMEM), L1 cache
-- Schedules warps from CTAs assigned to it
-- Has its own Tensor Cores, ALUs, special function units
-- Runs warps from up to ~16 different CTAs concurrently (depending on occupancy)
+- 有自己的寄存器、共享内存（SMEM）、L1 缓存
+- 从分配给它的 CTA 中调度 warp
+- 有自己的 Tensor Core、ALU、特殊函数单元
+- 可同时运行来自最多约 16 个不同 CTA 的 warp（取决于占用率）
 
-A modern Blackwell GPU has 60–144 SMs, depending on the SKU. The number of SMs determines peak throughput.
+一块现代 Blackwell GPU 有 60–144 个 SM，视 SKU 而定。SM 数量决定峰值吞吐。
 
 ```mermaid
 graph TD
@@ -44,77 +44,77 @@ graph TD
     SM0 --- W0a[warp]
     SM0 --- W0b[warp]
     SM0 --- W0c[...]
-    W0a --- T0[thread 0]
-    W0a --- T1[thread 1]
-    W0a --- T31[thread 31]
+    W0a --- T0[线程 0]
+    W0a --- T1[线程 1]
+    W0a --- T31[线程 31]
 ```
 
-A CTA is assigned to one SM at launch and stays there for its lifetime. CTAs cannot migrate across SMs.
+一个 CTA 在启动时被分配到某个 SM，之后整个生命周期都待在那里。CTA 不能在 SM 之间迁移。
 
-## SIMT execution
+## SIMT 执行
 
-Threads within a warp execute the **same instruction in lock-step**. This is the "Single Instruction, Multiple Threads" abstraction: 32 threads issue the same op, each on its own data.
+同一个 warp 里的线程**锁步执行同一条指令**。这就是"单指令多线程"抽象：32 个线程发射同一个操作，各自处理自己的数据。
 
-What happens on a divergent branch (where some threads in a warp take the `if`, others take the `else`)? The hardware **serializes** the two paths — first executes the `if`-branch with the `else`-branch threads masked off, then the `else`-branch with the `if`-branch threads masked off. This is called **warp divergence** and is a primary performance concern.
+遇到分支分歧（warp 里一部分线程走 `if`，另一部分走 `else`）会怎样？硬件会把两条路径**串行化**——先执行 `if` 分支、把走 `else` 的线程屏蔽掉，再执行 `else` 分支、把走 `if` 的线程屏蔽掉。这叫 **warp 分歧**，是首要的性能隐患之一。
 
-Within a warp, threads can communicate via:
+warp 内部，线程之间可以通过这些方式通信：
 
-- **Warp shuffle** instructions (`__shfl_sync`, `__shfl_up_sync`, etc.) — direct register-to-register transfers between lanes
-- **Warp vote** instructions (`__ballot_sync`, `__all_sync`, `__any_sync`) — collective predicates
-- **Warp matrix** instructions (`mma.sync`) — the Tensor Core MMA we'll cover later
+- **warp shuffle** 指令（`__shfl_sync`、`__shfl_up_sync` 等）— lane 之间寄存器到寄存器的直接传输
+- **warp vote** 指令（`__ballot_sync`、`__all_sync`、`__any_sync`）— 集体谓词
+- **warp matrix** 指令（`mma.sync`）— Tensor Core 的 MMA，后面会讲
 
-Across warps within a CTA, threads communicate via:
+同一个 CTA 内、跨 warp 的线程通信方式：
 
-- **Shared memory** (SMEM) — programmer-managed scratchpad
-- **`__syncthreads()`** — barrier synchronization
+- **共享内存**（SMEM）— 由程序员管理的暂存区
+- **`__syncthreads()`** — 屏障同步
 
-Across CTAs there is no synchronization in the standard model — CTAs are independent, completing in unspecified order. This changes with **thread block clusters** (Hopper+), which we'll cover in [`blackwell/sm100-vs-sm120`](../blackwell/sm100-vs-sm120.md).
+跨 CTA 在标准模型里没有同步手段——CTA 彼此独立，完成顺序不定。**线程块簇**（cluster，Hopper 及之后）改变了这一点，我们会在 [`blackwell/sm100-vs-sm120`](../blackwell/sm100-vs-sm120.md) 里讲。
 
-## Occupancy
+## 占用率
 
-How many warps from how many CTAs an SM can run concurrently is bounded by:
+一个 SM 能同时跑多少个 CTA 的多少个 warp，受这些因素限制：
 
-- **Register pressure** — each thread holds N registers; the SM has a fixed register file (e.g., 64K 32-bit registers/SM)
-- **SMEM use per CTA** — bounded by SMEM/SM (e.g., 99 KiB on SM120)
-- **Threads per SM** — hardware limit, typically 1024 or 2048
-- **CTAs per SM** — hardware limit, typically 32
+- **寄存器压力** — 每个线程占 N 个寄存器；SM 的寄存器堆是固定的（例如每 SM 64K 个 32 位寄存器）
+- **每个 CTA 的 SMEM 用量** — 受每 SM 的 SMEM 总量限制（例如 SM120 上是 99 KiB）
+- **每 SM 线程数** — 硬件上限，通常是 1024 或 2048
+- **每 SM 的 CTA 数** — 硬件上限，通常是 32
 
-The product of these constraints determines **occupancy** — the fraction of theoretical maximum warps actually resident. Higher occupancy hides latency (one warp stalls, another runs); too high occupancy spreads register/SMEM resources thin.
+这些约束共同决定了**占用率**——实际驻留的 warp 数占理论最大值的比例。占用率高有助于掩盖延迟（一个 warp 停住了，另一个顶上）；占用率过高则会把寄存器和 SMEM 摊得太薄。
 
-Tensor-Core-heavy kernels often run at relatively **low** occupancy intentionally — they need more registers and SMEM per warp to feed the matrix-multiply pipeline, and the Tensor Cores themselves don't need many warps to stay busy.
+Tensor Core 密集型 kernel 往往会有意跑在相对**低**的占用率下——它们每个 warp 需要更多寄存器和 SMEM 来喂饱矩阵乘流水线，而 Tensor Core 本身并不需要很多 warp 就能保持忙碌。
 
-## Async execution and streams
+## 异步执行与流
 
-Kernel launches are **asynchronous** from the host's perspective. The host enqueues a kernel onto a CUDA stream and continues; the kernel runs on the device when scheduling allows.
+从主机的角度看，kernel 启动是**异步**的。主机把 kernel 排进一条 CUDA 流后就继续往下走；kernel 在设备上等调度允许时再运行。
 
-A **stream** is an ordered sequence of operations (kernels, memcpy, events). Operations within a stream serialize; operations across streams can overlap. Modern inference engines aggressively pipeline using multiple streams.
+**流**（stream）是一个有序的操作序列（kernel、memcpy、事件）。同一条流内的操作串行执行；不同流之间的操作可以重叠。现代推理引擎会大量使用多条流来做流水线。
 
-## Cooperative groups (briefly)
+## 协作组（简述）
 
-CUDA exposes a `cooperative_groups` namespace that abstracts the warp/block/cluster hierarchy. You'll see `tile<32>`, `block_tile<32>`, `coalesced_threads`, etc. in modern CUDA C++. This is mostly a quality-of-life wrapper over the underlying hierarchy described above.
+CUDA 提供了 `cooperative_groups` 命名空间，把 warp/block/cluster 层级抽象出来。现代 CUDA C++ 里会见到 `tile<32>`、`block_tile<32>`、`coalesced_threads` 等。它基本上是在上面描述的底层层级之上包了一层，方便使用。
 
-## Why this matters for Blackwell
+## 这对 Blackwell 意味着什么
 
-Two execution-model changes are central to the SM100/SM120 story:
+执行模型上有两个变化是 SM100/SM120 故事的核心：
 
-1. **Thread block clusters** (introduced Hopper, expanded Blackwell datacenter): a way to group multiple CTAs that share an SM-cluster's distributed shared memory. SM100 supports up to **cluster size 16**; SM120 supports only **cluster size 1** (no actual clustering). Kernels written for `cluster(2,1,1)` won't behave correctly on SM120.
+1. **线程块簇**（Hopper 引入，数据中心版 Blackwell 扩展）：把多个 CTA 编成一组，共享一个 SM 簇的分布式共享内存。SM100 支持最大 **cluster size 16**；SM120 只支持 **cluster size 1**（也就是没有真正的簇）。按 `cluster(2,1,1)` 写的 kernel 在 SM120 上不会正确工作。
 
-2. **Async-everything**: SM100's `tcgen05` family decouples Tensor Core execution from warp execution. The MMA fires asynchronously; the warp continues; synchronization is via Tensor Memory or completion barriers. This pushes the SIMT model harder than ever before. SM120 doesn't have `tcgen05`, so it's stuck with the older synchronous `mma.sync` style. Kernels that assumed async overlap on SM100 lose that overlap when ported.
+2. **一切皆异步**：SM100 的 `tcgen05` 指令族把 Tensor Core 的执行与 warp 的执行解耦。MMA 异步发出，warp 继续往下跑，同步靠 Tensor Memory 或完成屏障来做。这把 SIMT 模型推到了前所未有的程度。SM120 没有 `tcgen05`，只能停留在老式的同步 `mma.sync` 风格。在 SM100 上依赖异步重叠的 kernel，移植过去就失去了这种重叠。
 
-Both changes are covered in [`blackwell/sm100-vs-sm120`](../blackwell/sm100-vs-sm120.md) and [`blackwell/tcgen05-and-tmem`](../blackwell/tcgen05-and-tmem.md).
+这两个变化在 [`blackwell/sm100-vs-sm120`](../blackwell/sm100-vs-sm120.md) 和 [`blackwell/tcgen05-and-tmem`](../blackwell/tcgen05-and-tmem.md) 里都有讲。
 
-## Checkpoint
+## 自测
 
-You should be able to answer:
+读完你应该能回答：
 
-- What's the difference between a thread, a warp, and a CTA?
-- How do threads within a warp communicate?
-- How do warps within a CTA communicate?
-- Why might a kernel run at 25 % occupancy intentionally?
-- What's the relationship between a CTA and an SM during execution?
+- 线程、warp、CTA 之间有什么区别？
+- warp 内的线程怎样通信？
+- CTA 内的 warp 怎样通信？
+- 为什么一个 kernel 会有意跑在 25 % 的占用率？
+- 执行期间 CTA 和 SM 是什么关系？
 
-## See also
+## 另见
 
-- [`memory-hierarchy`](memory-hierarchy.md) — how data flows under this execution model
-- [`tensor-cores`](tensor-cores.md) — the matrix-multiply hardware
-- NVIDIA *CUDA C++ Programming Guide*, ch. 5 (Execution Model) and ch. 12 (Cooperative Groups)
+- [`memory-hierarchy`](memory-hierarchy.md) — 在这个执行模型下数据怎样流动
+- [`tensor-cores`](tensor-cores.md) — 矩阵乘硬件
+- NVIDIA *CUDA C++ Programming Guide* 第 5 章（Execution Model）和第 12 章（Cooperative Groups）

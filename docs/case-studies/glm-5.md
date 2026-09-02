@@ -1,61 +1,61 @@
-# GLM-5 family
+# GLM-5 系列
 
-Zhipu AI / Tsinghua's MoE family. GLM-4.5, GLM-4.7, GLM-5.0, GLM-5.1 (2025–2026). The model that's most commonly cited as **the easiest large MoE to run on workstation Blackwell**, because of how its dependency stack is structured.
+智谱 AI / 清华的 MoE 系列。GLM-4.5、GLM-4.7、GLM-5.0、GLM-5.1（2025–2026）。这是公认**在工作站 Blackwell 上最好跑的大型 MoE**，原因在于它的依赖栈结构。
 
-## The model
+## 模型本身
 
-| | GLM-5.0 | GLM-5.1 (full) | GLM-5.1 (REAP-160) |
+| | GLM-5.0 | GLM-5.1（完整版） | GLM-5.1（REAP-160） |
 | --- | --- | --- | --- |
-| Total parameters | ~620 B | 744 B | 478 B |
-| Active per token | ~36 B | 42 B | ~36 B |
-| Number of experts | 160 routed | 256 routed | 160 routed (after pruning) |
+| 总参数 | ~620 B | 744 B | 478 B |
+| 每 token 激活参数 | ~36 B | 42 B | ~36 B |
+| 专家数 | 160 路由 | 256 路由 | 160 路由（剪枝后） |
 | Top-k | 6 | 8 | 8 |
-| Hidden dim | 6144 | 7168 | 7168 |
-| Attention | MHA + DSA option | MHA + DSA option | MHA + NSA option |
-| Native quantization | FP8 | NVFP4 | NVFP4 |
+| 隐层维度 | 6144 | 7168 | 7168 |
+| Attention | MHA + 可选 DSA | MHA + 可选 DSA | MHA + 可选 NSA |
+| 原生量化格式 | FP8 | NVFP4 | NVFP4 |
 
-GLM-5.1 introduced two attention variants: standard MHA, and DSA (Differential Sparse Attention) for long-context. DSA has a known kernel issue on SM120 (see below); MHA works fine.
+GLM-5.1 引入了两种 attention 变体：标准 MHA，以及面向长上下文的 DSA（Differential Sparse Attention）。DSA 在 SM120 上有一个已知的 kernel 问题（见下文）；MHA 没问题。
 
-REAP-160 is Zhipu's official pruning recipe that brings GLM-5.1 from 256 to 160 experts with minimal quality loss (~0.3 perplexity drop). The resulting 478B-parameter model is **specifically sized to fit 4× 96 GB workstation Blackwell**.
+REAP-160 是智谱官方的剪枝配方，把 GLM-5.1 从 256 个专家减到 160 个，质量损失很小（困惑度约变差 0.3）。得到的 478B 参数模型**尺寸就是按 4× 96 GB 工作站 Blackwell 来定的**。
 
-## What the reference deployment assumes
+## 参考部署默认了什么
 
-Zhipu's deployment guidance for GLM-5 targets:
+智谱给 GLM-5 的部署指南面向：
 
-- **Hardware**: H200 / B200, with NVLink ideally
-- **GEMM**: stock CUTLASS NVFP4 templates
-- **Attention**: FlashAttention-2 (MHA) or custom DSA kernel
-- **MoE**: sglang or vLLM, with the engine choosing between FlashInfer-MoE and CUTLASS-MoE backends
-- **Parallelism**: EP=N for the experts, TP within each expert
+- **硬件**：H200 / B200，最好有 NVLink
+- **GEMM**：原版 CUTLASS 的 NVFP4 模板
+- **Attention**：FlashAttention-2（MHA）或定制 DSA kernel
+- **MoE**：sglang 或 vLLM，由引擎在 FlashInfer-MoE 和 CUTLASS-MoE 后端之间选择
+- **并行方式**：专家用 EP=N，专家内部用 TP
 
-The dependency stack is **the lightest of the three families covered here**: stock CUTLASS, stock FlashAttention, no custom GEMM library. The only `tcgen05`-specific code path is the optional FlashInfer-MoE one-shot a2a, which is opt-in.
+依赖栈是**本节三个系列里最轻的**：原版 CUTLASS、原版 FlashAttention，没有自研 GEMM 库。唯一依赖 `tcgen05` 的代码路径是可选的 FlashInfer-MoE one-shot a2a，需要手动开启。
 
-## What breaks on workstation Blackwell
+## 在工作站 Blackwell 上哪里会坏
 
-### 1. EP plan (default for some configs)
+### 1. EP 方案（某些配置的默认值）
 
-If the inference engine defaults to EP, you hit the all-to-all bandwidth wall. Switch to TP.
+如果推理引擎默认走 EP，就会撞上 all-to-all 的带宽墙。改成 TP。
 
-### 2. DSA path on SM120
+### 2. SM120 上的 DSA 路径
 
-GLM-5.1's DSA kernel has a path that fails to compile on SM120 in some inference engine versions. This is a known issue; vLLM 0.7.x and sglang 0.5.10+ have patched it.
+GLM-5.1 的 DSA kernel 有一条路径在某些推理引擎版本里无法在 SM120 上编译。这是已知问题；vLLM 0.7.x 和 sglang 0.5.10+ 已经修了。
 
-For long-context inference, you can either:
+长上下文推理可以二选一：
 
-- Enable DSA with the patched engines
-- Fall back to MHA (slower at long context, but correct)
+- 用打过补丁的引擎开启 DSA
+- 回退到 MHA（长上下文下更慢，但结果正确）
 
-### 3. CUTLASS SMEM cliff
+### 3. CUTLASS SMEM 断崖
 
-Same as elsewhere — CUTLASS NVFP4 templates may overflow SMEM. Use SM120 templates with smaller tiles.
+和别处一样——CUTLASS 的 NVFP4 模板可能把 SMEM 撑爆。用 SM120 模板，tile 设小一点。
 
-### 4. fp8_e4m3 KV on certain sglang versions
+### 4. 某些 sglang 版本上的 fp8_e4m3 KV
 
-Some intermediate sglang versions hit a `tcgen05.cp`-based dequant path for FP8 KV. Pin to **sglang 0.5.10.post1 or later** which uses an `mma.sync`-based dequant path.
+一些中间版本的 sglang 对 FP8 KV 的反量化会走基于 `tcgen05.cp` 的路径。请固定到 **sglang 0.5.10.post1 或更高版本**，它的反量化路径基于 `mma.sync`。
 
-## What works on workstation Blackwell
+## 在工作站 Blackwell 上什么能用
 
-A working configuration for GLM-5.1 REAP-160 NVFP4:
+GLM-5.1 REAP-160 NVFP4 的一套能跑的配置：
 
 ```yaml
 weights: NVFP4 (REAP-160 prune of GLM-5.1, fits 4× 96GB)
@@ -69,43 +69,43 @@ gemm_backend: cutlass (SM120 templates)
 attention_backend: triton (auto-selected on SM120)
 ```
 
-GLM-5.1 REAP-160 + NVFP4 quantization fits 4× 96 GB workstation Blackwell with substantial KV-cache headroom — enough for **200k-token context** with FP8 KV. This is the model class for which workstation Blackwell is genuinely viable as a deployment target.
+GLM-5.1 REAP-160 + NVFP4 量化能装进 4× 96 GB 工作站 Blackwell，还留有充足的 KV cache 余量——用 FP8 KV 足够跑 **200k token 上下文**。对这一类模型来说，工作站 Blackwell 是真正可用的部署目标。
 
-## Performance expectations
+## 性能预期
 
-On 4× workstation Blackwell:
+4 张工作站 Blackwell 上：
 
-| Variant | Context | Decode tok/s |
+| 变体 | 上下文 | Decode tok/s |
 | --- | ---: | ---: |
 | GLM-5.1 REAP-160 | 256 | 46 |
 | GLM-5.1 REAP-160 | 4 K | 42 |
 | GLM-5.1 REAP-160 | 16 K | 38 |
 | GLM-5.1 REAP-160 | 150 K | 22 |
 
-These are from a TP=4, NVFP4-weights, FP8-KV, kv_splits=64 configuration. Without the kv_splits=64 setting, the long-context number drops to ~5 tok/s — that one knob is the largest single perf lever on this hardware class.
+这些数据来自 TP=4、NVFP4 权重、FP8 KV、kv_splits=64 的配置。如果不设 kv_splits=64，长上下文那一行会掉到约 5 tok/s——在这类硬件上，这一个开关就是最大的单项性能杠杆。
 
-For comparison: the same model on a 4× B100 (datacenter Blackwell) deployment hits ~120–150 tok/s in the same configuration. The ~5× gap is consistent across all the case studies.
+对比一下：同一模型、同一配置在 4× B100（数据中心版 Blackwell）上大约 120–150 tok/s。约 5 倍的差距在所有案例分析里都一致。
 
-## What makes GLM-5 the "easy" case
+## 为什么 GLM-5 是"容易"的那个
 
-- **Lighter custom-kernel surface**: stock CUTLASS, stock FlashAttention. No DeepGEMM-equivalent.
-- **Pruning recipe sized for consumer hardware**: REAP-160 specifically targets 4× 96 GB.
-- **MoE plan flexibility**: model architecture works fine under TP-only, no EP requirement
-- **Active community**: workstation Blackwell deployment is documented and tested
+- **定制 kernel 面更小**：原版 CUTLASS、原版 FlashAttention，没有 DeepGEMM 之类的东西。
+- **剪枝配方按消费级硬件定尺寸**：REAP-160 明确瞄准 4× 96 GB。
+- **MoE 并行方案灵活**：模型架构在纯 TP 下工作良好，不强制 EP
+- **社区活跃**：工作站 Blackwell 部署有文档、有人测过
 
-If you're new to running MoE on workstation Blackwell and want a model that "just works," GLM-5.1 REAP-160 NVFP4 is the recommended starting point.
+如果你刚开始在工作站 Blackwell 上跑 MoE，想找一个"直接能用"的模型，推荐从 GLM-5.1 REAP-160 NVFP4 起步。
 
-## What MTP and NSA add
+## MTP 和 NSA 带来什么
 
-- **MTP (Multi-Token Prediction)**: speculative decoding for higher throughput. Adds an extra prediction head; requires `page_size=64` and BF16 KV. Optional; opt-in via inference engine flags.
-- **NSA (Native Sparse Attention)**: sparsity in the attention computation for long-context. Has SM120 kernel issues in some versions; safest to leave disabled.
+- **MTP（Multi-Token Prediction，多 token 预测）**：投机解码，提高吞吐。多加一个预测头；要求 `page_size=64` 和 BF16 KV。可选，通过推理引擎参数开启。
+- **NSA（Native Sparse Attention，原生稀疏注意力）**：在 attention 计算里引入稀疏性，面向长上下文。某些版本在 SM120 上有 kernel 问题；最稳妥的做法是关着。
 
-For initial deployments, leave both disabled. Enable MTP if you need throughput beyond what the baseline configuration provides.
+初次部署时两个都别开。如果基线配置的吞吐不够用，再开 MTP。
 
-## See also
+## 另见
 
-- [`deepseek-v3-v4`](deepseek-v3-v4.md) — heavier dependency stack
-- [`kimi-k2`](kimi-k2.md) — comparable size, more memory pressure
-- [`compatibility/`](../compatibility/index.md) — the patterns
-- Zhipu AI's GLM-5 release notes and HuggingFace model cards
-- The REAP pruning paper
+- [`deepseek-v3-v4`](deepseek-v3-v4.md) —— 依赖栈更重
+- [`kimi-k2`](kimi-k2.md) —— 规模相当，显存压力更大
+- [`compatibility/`](../compatibility/index.md) —— 通用套路
+- 智谱 AI 的 GLM-5 发布说明和 HuggingFace 模型卡
+- REAP 剪枝论文

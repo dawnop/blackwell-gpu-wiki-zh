@@ -1,174 +1,174 @@
-# Glossary
+# 术语表
 
-Project-specific and Blackwell-specific vocabulary. Cross-linked to the page where each term is explained in depth.
+本项目专用和 Blackwell 专属的词汇。每个词条都链接到深入讲解它的页面。
 
-## Compute capability
+## 计算能力
 
-**Compute capability** — NVIDIA's versioning scheme for SM ISAs, written as `<major>.<minor>` (e.g., `7.0` Volta, `8.0` Ampere, `9.0` Hopper, `10.0` datacenter Blackwell, `12.0` workstation/consumer Blackwell). Same major version generally implies forward-compatible PTX; different major version means features may not exist. See [`fundamentals/cuda-pipeline`](../fundamentals/cuda-pipeline.md).
+**Compute capability（计算能力，CC）**——NVIDIA 为 SM ISA 定的版本编号方案，写作 `<主版本>.<次版本>`（例如 `7.0` Volta、`8.0` Ampere、`9.0` Hopper、`10.0` 数据中心版 Blackwell、`12.0` 工作站/消费级 Blackwell）。主版本相同通常意味着 PTX 向前兼容；主版本不同则某些特性可能根本不存在。见 [`fundamentals/cuda-pipeline`](../fundamentals/cuda-pipeline.md)。
 
-**`sm_NN`** — the lowercase compiler-flag form of compute capability. `sm_100`, `sm_120`. Bare form: portable subset of the architecture.
+**`sm_NN`**——计算能力的编译器标志小写形式。`sm_100`、`sm_120`。不带后缀的形式：该架构的可移植子集。
 
-**`sm_NNa`** — "architecture-specific accelerated." Allows non-portable instructions (e.g., `sm_100a` enables `tcgen05.*`). Code compiled with the `a` suffix runs only on that exact compute capability — not earlier, not later.
+**`sm_NNa`**——"架构专属加速"（architecture-specific accelerated）。允许使用不可移植的指令（例如 `sm_100a` 开启 `tcgen05.*`）。带 `a` 后缀编译出的代码只能在这一个精确的计算能力上运行——早的不行，晚的也不行。
 
-**`sm_NNf`** — "forward-compatible." Restricts the code to instructions that will run on `sm_NN` and any later same-major architecture. Useful for code that needs to work across `sm_120` workstation parts and any future `sm_12N` parts.
+**`sm_NNf`**——"向前兼容"（forward-compatible）。把代码限制在能在 `sm_NN` 以及之后所有同主版本架构上运行的指令范围内。适合需要同时在 `sm_120` 工作站芯片和未来任何 `sm_12N` 芯片上运行的代码。
 
-## Architectures and codenames
+## 架构与代号
 
-**Blackwell** — NVIDIA's GPU generation, 2024–2026.
-- **GB100**: B100/B200 datacenter chips, SM 10.0, HBM3e, NVLink 5.
-- **GB202**: workstation/consumer chips (RTX PRO 6000 Workstation, RTX 5090), SM 12.0, GDDR7, no NVLink.
+**Blackwell**——NVIDIA 的 GPU 世代，2024–2026 年。
+- **GB100**：B100/B200 数据中心芯片，SM 10.0，HBM3e，NVLink 5。
+- **GB202**：工作站/消费级芯片（RTX PRO 6000 Workstation、RTX 5090），SM 12.0，GDDR7，无 NVLink。
 
-**Hopper** — preceding NVIDIA generation. SM 9.0 (H100/H200). Introduced TMA, async tensor cores (`wgmma.async`), thread block clusters.
+**Hopper**——NVIDIA 的上一代。SM 9.0（H100/H200）。引入了 TMA、异步 Tensor Core（`wgmma.async`）、线程块簇。
 
-**Ampere** — generation before Hopper. SM 8.0/8.6/8.9 (A100, RTX 30/40 series).
+**Ampere**——Hopper 的上一代。SM 8.0/8.6/8.9（A100、RTX 30/40 系列）。
 
-**SXM** — NVIDIA's datacenter card form factor. Implies presence of NVLink. (RTX cards are PCIe form factor; the "PRO" line spans both.)
+**SXM**——NVIDIA 数据中心卡的板型。有 SXM 就意味着有 NVLink。（RTX 卡是 PCIe 板型；"PRO"产品线两种都有。）
 
-## Memory
+## 内存
 
-**Global memory (HBM/GDDR)** — off-chip device memory. HBM3e on datacenter Blackwell (~3–8 TB/s), GDDR7 on workstation (~1.6 TB/s).
+**Global memory（全局内存，HBM/GDDR）**——片外显存。数据中心版 Blackwell 用 HBM3e（约 3–8 TB/s），工作站用 GDDR7（约 1.6 TB/s）。
 
-**Shared memory (SMEM)** — on-chip per-block scratchpad. Programmer-managed. Capacities: 99 KiB/block on SM120, 228 KiB/block on SM100. The 99 vs 228 split is one of the most consequential numbers in this wiki. See [`fundamentals/memory-hierarchy`](../fundamentals/memory-hierarchy.md).
+**Shared memory（共享内存，SMEM）**——片上、每 block 独享的暂存区，由程序员管理。容量：SM120 上每 block 99 KiB，SM100 上每 block 228 KiB。99 与 228 之分是本 wiki 里影响最大的数字之一。见 [`fundamentals/memory-hierarchy`](../fundamentals/memory-hierarchy.md)。
 
-**Tensor Memory (TMEM)** — a new on-chip memory class introduced with SM100. Holds Tensor Core accumulators decoupled from registers. **Does not exist on SM120.** See [`blackwell/tcgen05-and-tmem`](../blackwell/tcgen05-and-tmem.md).
+**Tensor Memory（张量内存，TMEM）**——SM100 新引入的一类片上内存。存放 Tensor Core 的累加器，与寄存器解耦。**SM120 上不存在。** 见 [`blackwell/tcgen05-and-tmem`](../blackwell/tcgen05-and-tmem.md)。
 
-**Registers** — per-thread storage. Limit: 255 32-bit registers per thread on most current arches.
+**Registers（寄存器）**——每线程私有的存储。上限：目前大多数架构上每线程 255 个 32 位寄存器。
 
-**Constant memory** — small, cached, read-only memory class.
+**Constant memory（常量内存）**——小容量、带缓存、只读的一类内存。
 
-**L1 / L2 cache** — on-chip caches in the standard memory hierarchy.
+**L1 / L2 cache（L1 / L2 缓存）**——标准内存层级中的片上缓存。
 
 ## Tensor Core ISA
 
-**`mma.sync`** — universal Tensor Core MMA instruction, available since Volta. Synchronous: warp blocks until result lands in registers. Operates on small tiles (m16n8k16 / m16n8k32). Available on **both** SM100 and SM120.
+**`mma.sync`**——通用的 Tensor Core MMA 指令，自 Volta 起可用。同步：warp 阻塞直到结果落入寄存器。作用于小 tile（m16n8k16 / m16n8k32）。SM100 和 SM120 上**都**可用。
 
-**`wgmma.async`** — Hopper's warp-group async MMA. Larger tiles, asynchronous. Mostly superseded by `tcgen05.mma` on Blackwell datacenter; still supported on Hopper.
+**`wgmma.async`**——Hopper 的 warp 组异步 MMA。tile 更大，异步执行。在数据中心版 Blackwell 上基本被 `tcgen05.mma` 取代；Hopper 上仍然支持。
 
-**`tcgen05.mma`** — Blackwell datacenter MMA family. Asynchronous, large-tile (up to m128n128k64 single-CTA, m256n128k64 CTA-pair), accumulator in TMEM. **Datacenter only.** See [`blackwell/tcgen05-and-tmem`](../blackwell/tcgen05-and-tmem.md).
+**`tcgen05.mma`**——数据中心版 Blackwell 的 MMA 指令族。异步、大 tile（单 CTA 最大 m128n128k64，CTA pair 最大 m256n128k64），累加器放在 TMEM 里。**仅数据中心版可用。** 见 [`blackwell/tcgen05-and-tmem`](../blackwell/tcgen05-and-tmem.md)。
 
-**`tcgen05.alloc` / `tcgen05.commit` / `tcgen05.cp`** — companion instructions for managing TMEM allocation, completion, and copy-out.
+**`tcgen05.alloc` / `tcgen05.commit` / `tcgen05.cp`**——配套指令，分别负责 TMEM 的分配、完成同步和拷出。
 
-## Number formats
+## 数值格式
 
-**FP16** — half-precision IEEE float. 1 sign + 5 exponent + 10 mantissa.
+**FP16**——IEEE 半精度浮点。1 位符号 + 5 位指数 + 10 位尾数。
 
-**BF16** — brain-float-16. 1 sign + 8 exponent + 7 mantissa. Same range as FP32; less precision.
+**BF16**——brain-float-16。1 位符号 + 8 位指数 + 7 位尾数。范围与 FP32 相同，精度更低。
 
-**FP8 E4M3** — 8-bit float, 4 exponent bits, 3 mantissa. Better precision, smaller range.
+**FP8 E4M3**——8 位浮点，4 位指数、3 位尾数。精度较高，范围较小。
 
-**FP8 E5M2** — 8-bit float, 5 exponent, 2 mantissa. Larger range, less precision. Often used for gradients in training.
+**FP8 E5M2**——8 位浮点，5 位指数、2 位尾数。范围较大，精度较低。训练中常用于梯度。
 
-**FP6** — 6-bit float (E2M3 or E3M2). Less common; appears in some quantization recipes.
+**FP6**——6 位浮点（E2M3 或 E3M2）。不太常见；出现在一些量化方案里。
 
-**FP4 (E2M1)** — 4-bit float, 1 sign + 2 exponent + 1 mantissa. Tiny range; only useful in **block-quantized** form with a per-block scale.
+**FP4（E2M1）**——4 位浮点，1 位符号 + 2 位指数 + 1 位尾数。范围极小；只有以**块量化**形式、配上每块一个缩放因子才有用。
 
-**MX-FP4** — Open Compute Project Microscaling spec for FP4. 32-element block, per-block FP6 (E3M2) scale.
+**MX-FP4**——Open Compute Project 的微缩放（Microscaling）FP4 规范。32 个元素一块，每块一个 FP6（E3M2）缩放因子。
 
-**NVFP4** — NVIDIA's variant of MX-FP4. **16-element block** (smaller → better dynamic-range tracking), per-block **FP8 (E4M3) scale** (more scale precision than FP6). Native on both SM100 and SM120 Tensor Cores. See [`fundamentals/number-formats`](../fundamentals/number-formats.md).
+**NVFP4**——NVIDIA 版的 MX-FP4。**16 个元素一块**（块更小，动态范围跟得更紧），每块一个 **FP8（E4M3）缩放因子**（比 FP6 的缩放精度更高）。SM100 和 SM120 的 Tensor Core 都原生支持。见 [`fundamentals/number-formats`](../fundamentals/number-formats.md)。
 
-**TF32** — 19-bit Tensor Core internal format on Ampere+. 1 sign + 8 exponent + 10 mantissa. Used for FP32 matmuls accelerated through Tensor Cores.
+**TF32**——Ampere 及之后 Tensor Core 内部使用的 19 位格式。1 位符号 + 8 位指数 + 10 位尾数。用于让 FP32 矩阵乘走 Tensor Core 加速。
 
-## Parallelism plans
+## 并行方案
 
-**TP (Tensor Parallelism)** — split each weight matrix across N GPUs, all-reduce per layer. Good for GEMM-bound models on any topology.
+**TP（Tensor Parallelism，张量并行）**——把每个权重矩阵切到 N 张 GPU 上，每层做一次 all-reduce。适合 GEMM 密集型模型，对拓扑没有要求。
 
-**PP (Pipeline Parallelism)** — split layers across N GPUs, microbatch through. Good for memory-bound models. Some bubble overhead.
+**PP（Pipeline Parallelism，流水线并行）**——把各层分到 N 张 GPU 上，以微批次流过。适合访存受限的模型。有一定的气泡开销。
 
-**EP (Expert Parallelism)** — for MoE: each GPU owns a subset of experts, route tokens via all-to-all. Bandwidth-hungry; works well only on NVLink-class fabrics. See [`interconnect/moe-parallelism`](../interconnect/moe-parallelism.md).
+**EP（Expert Parallelism，专家并行）**——用于 MoE：每张 GPU 拥有一部分专家，token 通过 all-to-all 路由过去。极耗带宽；只在 NVLink 级别的 fabric 上表现良好。见 [`interconnect/moe-parallelism`](../interconnect/moe-parallelism.md)。
 
-**DP (Data Parallelism)** — replicate the model, split batch. Common for training, less for inference.
+**DP（Data Parallelism，数据并行）**——复制整个模型，切分 batch。训练中常见，推理中较少。
 
-**Hybrid plans** — TP + PP, EP + TP, etc. The pragmatic choice on most rigs.
+**Hybrid plans（混合方案）**——TP + PP、EP + TP 等。大多数机器上的务实选择。
 
-## Interconnect
+## 互连
 
-**NVLink** — NVIDIA's proprietary high-bandwidth GPU-to-GPU interconnect. Generation 5 (Blackwell): 1.8 TB/s/GPU on NVL72. **Datacenter only.**
+**NVLink**——NVIDIA 私有的高带宽 GPU 间互连。第 5 代（Blackwell）：NVL72 上每 GPU 1.8 TB/s。**仅数据中心版可用。**
 
-**NVSwitch** — NVLink-based switch fabric. Connects 8+ GPUs in a single chassis (DGX, HGX). Gives uniform bandwidth across all pairs.
+**NVSwitch**——基于 NVLink 的交换 fabric。在单个机箱（DGX、HGX）内连接 8 张以上 GPU，任意两卡之间带宽一致。
 
-**MNNVL (Multi-Node NVLink)** — NVL72-class fabric extending NVLink across racks (up to 72 GPUs).
+**MNNVL（Multi-Node NVLink，多节点 NVLink）**——NVL72 级别的 fabric，把 NVLink 扩展到跨机架（最多 72 张 GPU）。
 
-**PCIe** — universal host-side interconnect. Gen4 (16 GB/s/lane), Gen5 (32 GB/s/lane). x16 → 32 GB/s or 64 GB/s per direction.
+**PCIe**——通用的主机侧互连。Gen4（每 lane 16 GB/s），Gen5（每 lane 32 GB/s）。x16 → 每方向 32 GB/s 或 64 GB/s（译注：原文按每 lane 给出的数字实际是 x16 单向总带宽；PCIe Gen4 x16 单向约 32 GB/s，Gen5 x16 单向约 64 GB/s）。
 
-**P2P (peer-to-peer)** — direct GPU-to-GPU memory access without staging through host RAM. Enabled if GPUs share a switch or root complex.
+**P2P（peer-to-peer）**——GPU 之间直接访问彼此显存，不经过主机内存中转。GPU 共用同一个交换芯片或 root complex 时可用。
 
-**Atomics** — atomic memory operations across the interconnect. On consumer GPUs, P2P atomics are software-gated off by default; require BIOS (ACS Disabled) + driver (`RMDisableFeatureDisablement=1`) to enable. See [`interconnect/p2p-and-atomics`](../interconnect/p2p-and-atomics.md).
+**Atomics（原子操作）**——跨互连的原子内存操作。消费级 GPU 上，P2P 原子操作默认被软件锁住；需要 BIOS（ACS Disabled）+ 驱动（`RMDisableFeatureDisablement=1`）两处设置才能打开。见 [`interconnect/p2p-and-atomics`](../interconnect/p2p-and-atomics.md)。
 
-**ACS (Access Control Services)** — PCIe feature that, when **enabled**, isolates devices behind separate IOMMU groups and **blocks** P2P atomics. Counterintuitively, disabling ACS is what allows atomics.
+**ACS（Access Control Services）**——PCIe 的一项特性，**开启**时把设备隔离到各自的 IOMMU 组里，并**阻断** P2P 原子操作。有点反直觉：要允许原子操作，得把 ACS 关掉。
 
-**RDMA** — remote-DMA over network (InfiniBand, RoCE). Used for multi-node GPU-to-GPU transfers in datacenters. Not relevant to single-node consumer setups.
+**RDMA**——经网络（InfiniBand、RoCE）的远程 DMA。数据中心里用于多节点 GPU 间传输。与单节点消费级环境无关。
 
-## Kernel libraries
+## 内核库
 
-**CUTLASS** — NVIDIA's CUDA Templates library. The reference implementation of high-performance GEMM. Templates compile per-architecture; SM100 templates default to `sm_100a`. See [`kernels/cutlass`](../kernels/cutlass.md).
+**CUTLASS**——NVIDIA 的 CUDA 模板库。高性能 GEMM 的参考实现。模板按架构分别编译；SM100 模板默认目标是 `sm_100a`。见 [`kernels/cutlass`](../kernels/cutlass.md)。
 
-**FlashAttention (FA-2, FA-3)** — Tri Dao's attention kernel. FA-2 portable; FA-3 Hopper-only (a Blackwell port is in development). See [`kernels/flashattention`](../kernels/flashattention.md).
+**FlashAttention（FA-2、FA-3）**——Tri Dao 的注意力 kernel。FA-2 可移植；FA-3 仅支持 Hopper（Blackwell 移植开发中）。见 [`kernels/flashattention`](../kernels/flashattention.md)。
 
-**FlashInfer** — kernel library for serving (attention + MoE). NVFP4 paths exist; some MoE all-to-all kernels need P2P atomics. See [`kernels/flashinfer`](../kernels/flashinfer.md).
+**FlashInfer**——面向推理服务的 kernel 库（注意力 + MoE）。有 NVFP4 路径；部分 MoE all-to-all kernel 需要 P2P 原子操作。见 [`kernels/flashinfer`](../kernels/flashinfer.md)。
 
-**DeepGEMM** — DeepSeek's high-throughput FP8/FP4 GEMM. SM100-only as shipped. See [`kernels/deepgemm`](../kernels/deepgemm.md).
+**DeepGEMM**——DeepSeek 的高吞吐 FP8/FP4 GEMM。发布版本仅支持 SM100。见 [`kernels/deepgemm`](../kernels/deepgemm.md)。
 
-**Marlin** — INT4 GEMM with FP16 activations. Older arch; works on SM120.
+**Marlin**——INT4 权重、FP16 激活的 GEMM。面向较老的架构；SM120 上能用。
 
-**Triton** — DSL compiler for custom kernels. Works on SM120.
+**Triton**——用于编写自定义 kernel 的 DSL 编译器。SM120 上能用。
 
-**TransformerEngine** — NVIDIA's mixed-precision wrapper library. SM120 support evolving.
+**TransformerEngine**——NVIDIA 的混合精度封装库。SM120 支持仍在完善中。
 
-**NVSHMEM** — one-sided GPU memory primitives over NVLink. **Requires NVLink** for performance; PCIe fallback exists but is unusably slow.
+**NVSHMEM**——基于 NVLink 的单边 GPU 内存原语。要有性能**必须有 NVLink**；有 PCIe 回退路径，但慢到没法用。
 
-**DeepEP** — DeepSeek's expert-parallel a2a kernels. Intranode requires NVLink + NVSHMEM; internode requires RDMA.
+**DeepEP**——DeepSeek 的专家并行 a2a kernel。节点内需要 NVLink + NVSHMEM；节点间需要 RDMA。
 
-**vLLM, sglang, TensorRT-LLM** — high-level inference engines. They compose the above libraries. See [`kernels/inference-engines`](../kernels/inference-engines.md).
+**vLLM、sglang、TensorRT-LLM**——上层推理引擎。它们把上面这些库组合起来用。见 [`kernels/inference-engines`](../kernels/inference-engines.md)。
 
-## Models referenced
+## 提到的模型
 
-**DeepSeek-V3 / V4 / V4-Flash** — DeepSeek's frontier MoE family (671B, with V4 evolutions). Heavy users of `tcgen05`, DeepGEMM, NVSHMEM, EP.
+**DeepSeek-V3 / V4 / V4-Flash**——DeepSeek 的前沿 MoE 家族（671B，V4 有后续演进）。重度依赖 `tcgen05`、DeepGEMM、NVSHMEM、EP。
 
-**Kimi-K2 / K2.6** — Moonshot's MoE model family. Similar dependencies.
+**Kimi-K2 / K2.6**——月之暗面的 MoE 模型家族。依赖项类似。
 
-**GLM-5.0 / 5.1** — Zhipu's MoE family (~478B–744B). Less aggressive on `tcgen05`, but still reference-deployed on SM100.
+**GLM-5.0 / 5.1**——智谱的 MoE 家族（约 478B–744B）。对 `tcgen05` 依赖没那么激进，但参考部署仍在 SM100 上。
 
-**Qwen-3 (MoE variants)** — Alibaba's open MoE family.
+**Qwen-3（MoE 变体）**——阿里的开放 MoE 家族。
 
-**REAP** — "REbalanced Activation Pruning," a pruning technique that removes whole experts from a MoE model with minimal quality loss.
+**REAP**——"REbalanced Activation Pruning"，一种剪枝技术，从 MoE 模型里整个删掉部分专家而质量损失很小。
 
-## Compilation pipeline
+## 编译流程
 
-**`nvcc`** — NVIDIA CUDA Compiler. Front-end that drives host C++ compilation and produces PTX/cubin.
+**`nvcc`**——NVIDIA CUDA 编译器。前端驱动器，负责主机端 C++ 编译并产出 PTX/cubin。
 
-**`ptxas`** — PTX assembler. Lowers PTX to SASS (cubin).
+**`ptxas`**——PTX 汇编器。把 PTX 降到 SASS（cubin）。
 
-**`cuobjdump`** — inspector for compiled CUDA binaries.
+**`cuobjdump`**——编译后 CUDA 二进制的检查工具。
 
-**`nvdisasm`** — disassembler for SASS.
+**`nvdisasm`**——SASS 反汇编器。
 
-**SASS** — NVIDIA's per-architecture machine code. Not portable across SM versions.
+**SASS**——NVIDIA 按架构分别定义的机器码。跨 SM 版本不可移植。
 
-**Cubin** — compiled CUDA binary. Contains SASS for one or more architectures, plus optional PTX for JIT.
+**Cubin**——编译好的 CUDA 二进制。含一个或多个架构的 SASS，可选附带用于 JIT 的 PTX。
 
-**JIT** — just-in-time. The driver can compile PTX to SASS at load time if no matching cubin section exists.
+**JIT**——即时编译。如果没有匹配的 cubin 段，驱动可以在加载时把 PTX 编译成 SASS。
 
-## Other
+## 其他
 
-**KV cache** — key-value cache in attention. Stores past tokens' K and V projections so attention is O(N) per new token rather than O(N²).
+**KV cache**——注意力中的键值缓存。存下历史 token 的 K、V 投影，使每个新 token 的注意力开销是 O(N) 而不是 O(N²)。
 
-**Page-attention / paged KV** — block-based KV cache management (vLLM-style).
+**Page-attention / paged KV（分页注意力 / 分页 KV）**——按块管理 KV cache（vLLM 风格）。
 
-**MTP (Multi-Token Prediction)** — speculative-decoding scheme that predicts multiple tokens in parallel.
+**MTP（Multi-Token Prediction，多 token 预测）**——并行预测多个 token 的投机解码方案。
 
-**NSA (Native Sparse Attention)** — DeepSeek's sparse-attention variant.
+**NSA（Native Sparse Attention，原生稀疏注意力）**——DeepSeek 的稀疏注意力变体。
 
-**REAP-NN** — pruning denoting how many experts (per layer) survive (e.g., REAP-160 = 160 experts kept out of 256).
+**REAP-NN**——剪枝后每层保留多少专家的记法（例如 REAP-160 = 256 个专家里保留 160 个）。
 
-**Watchdog** — sglang/vLLM background thread that kills the server if a forward pass takes too long.
+**Watchdog（看门狗）**——sglang/vLLM 的后台线程，一次前向传播耗时过长就把服务进程杀掉。
 
-**xid** — NVIDIA driver error code (e.g., Xid 79 = GPU has fallen off the bus).
+**xid**——NVIDIA 驱动错误码（例如 Xid 79 = GPU 掉出总线）。
 
-**AER (Advanced Error Reporting)** — PCIe link-layer error reporting. RxErr counters on stressed Gen4 links.
+**AER（Advanced Error Reporting，高级错误报告）**——PCIe 链路层的错误报告。Gen4 链路负载重时会看到 RxErr 计数增长。
 
-**Bus / function / device IDs** — PCIe addressing, e.g., `01:00.0`. May change after BIOS settings change.
+**Bus / function / device IDs（总线 / 功能 / 设备号）**——PCIe 寻址，例如 `01:00.0`。改过 BIOS 设置后可能会变。
 
-## See also
+## 另见
 
-- [`reference/bibliography`](../reference/bibliography.md) for primary sources
-- [`reference/abbreviations`](../reference/abbreviations.md) for the alphabet-soup version
+- [`reference/bibliography`](../reference/bibliography.md)：一手来源
+- [`reference/abbreviations`](../reference/abbreviations.md)：一大堆缩写的速查版

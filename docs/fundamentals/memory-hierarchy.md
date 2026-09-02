@@ -1,17 +1,17 @@
-# Memory hierarchy
+# 内存层级
 
-Where data lives on a GPU. Six tiers, each with different size, bandwidth, latency, and visibility scope.
+数据在 GPU 上放在哪。一共六层，每层的容量、带宽、延迟和可见范围都不一样。
 
-## The pyramid
+## 金字塔
 
 ```mermaid
 graph TD
-    Reg["Registers<br/>~256 × 32-bit / thread<br/>~0 cycle latency<br/>thread-private"]
-    SMEM["Shared memory (SMEM)<br/>up to 99 / 228 KiB / block<br/>~20 cycle latency<br/>CTA-private"]
-    L1["L1 cache<br/>~128 KB / SM (shared with SMEM)<br/>~30 cycle latency"]
-    TMEM["Tensor Memory (TMEM)<br/>SM100 only — 256 KB / SM<br/>specialized for Tensor Cores"]
-    L2["L2 cache<br/>40-100 MB device-wide<br/>~250 cycle latency"]
-    HBM["Global memory (HBM3e / GDDR7)<br/>32-192 GB device<br/>~500 cycle latency<br/>1.6-8 TB/s"]
+    Reg["寄存器<br/>每线程约 256 × 32 位<br/>延迟约 0 周期<br/>线程私有"]
+    SMEM["共享内存（SMEM）<br/>每 block 最多 99 / 228 KiB<br/>延迟约 20 周期<br/>CTA 私有"]
+    L1["L1 缓存<br/>每 SM 约 128 KB（与 SMEM 共用）<br/>延迟约 30 周期"]
+    TMEM["Tensor Memory（TMEM）<br/>仅 SM100 — 每 SM 256 KB<br/>专供 Tensor Core 使用"]
+    L2["L2 缓存<br/>全设备 40-100 MB<br/>延迟约 250 周期"]
+    HBM["全局内存（HBM3e / GDDR7）<br/>每设备 32-192 GB<br/>延迟约 500 周期<br/>1.6-8 TB/s"]
     Reg --> SMEM
     SMEM --> L1
     L1 --> L2
@@ -20,69 +20,69 @@ graph TD
     TMEM -.-> L2
 ```
 
-The arrows represent the **data flow** for a typical compute kernel: load from global → stage in shared → consume in registers → produce results back through the chain.
+箭头表示典型计算 kernel 的**数据流**：从全局内存加载 → 暂存到共享内存 → 在寄存器中消费 → 结果沿同一条链路写回。
 
-## Per-tier detail
+## 逐层细节
 
-### Registers
+### 寄存器
 
-- **Capacity**: 255 32-bit registers per thread (CUDA limit, may go lower with `__launch_bounds__`)
-- **Latency**: effectively zero
-- **Bandwidth**: ~30 TB/s/SM (each thread can read multiple registers per cycle)
-- **Scope**: per-thread, no sharing
-- **Allocation**: by the compiler; you don't control which physical register holds which variable, but you control which variables exist
+- **容量**：每线程 255 个 32 位寄存器（CUDA 的上限，用 `__launch_bounds__` 可能会更低）
+- **延迟**：基本为零
+- **带宽**：每 SM 约 30 TB/s（每个线程每周期可读取多个寄存器）
+- **范围**：线程私有，不共享
+- **分配**：由编译器完成；你控制不了哪个变量落在哪个物理寄存器，但你能控制有哪些变量
 
-The register file is the bottleneck for occupancy on compute-bound kernels. Each SM has a fixed register file (e.g., 64K registers); 256 registers/thread × 32 threads/warp × 8 warps/CTA × 2 CTAs/SM ≈ 128K — already over budget. So in practice you compromise: lower per-thread register use, or fewer concurrent CTAs, or both.
+对计算密集型 kernel 来说，寄存器堆是占用率的瓶颈。每个 SM 的寄存器堆是固定的（例如 64K 个寄存器）；256 寄存器/线程 × 32 线程/warp × 8 warp/CTA × 2 CTA/SM ≈ 128K——已经超预算了。所以实际上你得妥协：降低每线程寄存器用量，或减少并发 CTA 数，或两者都做。
 
-### Shared memory (SMEM)
+### 共享内存（SMEM）
 
-The on-chip programmer-managed scratchpad. **The single most important number in this wiki:**
+片上由程序员管理的暂存区。**这是整份 wiki 里最重要的一个数字：**
 
-| Architecture | Per-block ceiling | Per-SM total |
+| 架构 | 每 block 上限 | 每 SM 总量 |
 | --- | ---: | ---: |
-| Volta (SM 7.0) | 96 KiB | 96 KiB |
-| Ampere (SM 8.0) | 164 KiB | 164 KiB |
-| Hopper (SM 9.0) | 228 KiB | 228 KiB |
-| **Blackwell datacenter (SM 10.0)** | **228 KiB** | 228 KiB |
-| **Blackwell workstation (SM 12.0)** | **99 KiB** | 99 KiB |
+| Volta（SM 7.0） | 96 KiB | 96 KiB |
+| Ampere（SM 8.0） | 164 KiB | 164 KiB |
+| Hopper（SM 9.0） | 228 KiB | 228 KiB |
+| **数据中心版 Blackwell（SM 10.0）** | **228 KiB** | 228 KiB |
+| **工作站 Blackwell（SM 12.0）** | **99 KiB** | 99 KiB |
 
-The 99 KiB workstation Blackwell ceiling is *substantially* lower than its Hopper-era cousin. Many kernel libraries (CUTLASS, FlashAttention) have templates that auto-size pipeline stages assuming a 228 KiB ceiling. On SM120 those templates request more SMEM than is allocatable. See [`blackwell/sm100-vs-sm120`](../blackwell/sm100-vs-sm120.md) for the consequences.
+工作站 Blackwell 的 99 KiB 上限比它 Hopper 时代的表亲*低得多*。许多内核库（CUTLASS、FlashAttention）的模板会按 228 KiB 的上限自动计算流水线级数。在 SM120 上，这些模板申请的 SMEM 超出了可分配的量。后果见 [`blackwell/sm100-vs-sm120`](../blackwell/sm100-vs-sm120.md)。
 
-SMEM properties:
+SMEM 的特性：
 
-- **Latency**: ~20–30 cycles
-- **Bandwidth**: ~10 TB/s/SM (when banks are accessed without conflict)
-- **Scope**: CTA-private
-- **Banks**: SMEM is 32-banked; consecutive 4-byte words map to consecutive banks. Bank conflicts (two threads in a warp accessing the same bank, different addresses) serialize.
+- **延迟**：约 20–30 周期
+- **带宽**：每 SM 约 10 TB/s（bank 访问无冲突时）
+- **范围**：CTA 私有
+- **bank**：SMEM 分 32 个 bank；连续的 4 字节字映射到连续的 bank。bank 冲突（同一 warp 里两个线程访问同一个 bank 的不同地址）会被串行化。
 
-CUDA exposes static SMEM (sized at compile time, declared with `__shared__`) and dynamic SMEM (sized at launch time, opted into via the launch's third parameter). For dynamic SMEM exceeding the architecture's "default" carveout (49 KiB on most arches), you need `cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, N)` before launch.
+CUDA 提供静态 SMEM（编译期定大小，用 `__shared__` 声明）和动态 SMEM（启动时定大小，通过启动配置的第三个参数启用）。动态 SMEM 若超过该架构的"默认"划分量（大多数架构上是 49 KiB），需要在启动前调用 `cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, N)`。
 
-### Tensor Memory (TMEM)
+### Tensor Memory（TMEM）
 
-**SM100 only.** A new on-chip memory class introduced with datacenter Blackwell. Holds Tensor Core accumulators decoupled from registers.
+**仅 SM100。** 随数据中心版 Blackwell 新引入的一类片上内存（张量内存）。用来存放 Tensor Core 的累加器，与寄存器解耦。
 
-- **Capacity**: 256 KB/SM (separate from SMEM)
-- **Bandwidth**: high enough to feed `tcgen05.mma` at peak
-- **Scope**: warp-group/CTA, allocated via `tcgen05.alloc`
-- **Latency**: hidden behind async TMA / `tcgen05.commit` operations
+- **容量**：每 SM 256 KB（独立于 SMEM）
+- **带宽**：足以让 `tcgen05.mma` 跑满峰值
+- **范围**：warp 组/CTA，通过 `tcgen05.alloc` 分配
+- **延迟**：被异步的 TMA / `tcgen05.commit` 操作掩盖
 
-TMEM exists because the largest `tcgen05.mma` tile (m256n128k64) accumulates into 32 KB of result data — far more than fits in registers, and a poor fit for SMEM (would consume the entire budget). TMEM gives the Tensor Core a private accumulator space, freeing registers and SMEM for other work.
+TMEM 存在的原因是：最大的 `tcgen05.mma` tile（m256n128k64）累加出的结果数据有 32 KB（译注：按 256×128 个 FP32 元素算应为 128 KB，32K 是元素个数）——远超寄存器能装下的量，放 SMEM 也不合适（会吃掉整个预算）。TMEM 给了 Tensor Core 一块私有的累加器空间，把寄存器和 SMEM 腾出来干别的。
 
-**SM120 has no equivalent.** Any kernel that uses TMEM must be rewritten to either chunk into smaller tiles (smaller accumulators that fit in registers) or stage accumulators through SMEM (consuming the 99 KiB budget). See [`compatibility/translating-tcgen05`](../compatibility/translating-tcgen05.md).
+**SM120 没有对应的东西。** 任何用到 TMEM 的 kernel 都必须重写：要么切成更小的 tile（累加器小到能放进寄存器），要么把累加器经由 SMEM 中转（占用那 99 KiB 的预算）。见 [`compatibility/translating-tcgen05`](../compatibility/translating-tcgen05.md)。
 
-### L1 / L2 caches
+### L1 / L2 缓存
 
-**L1**: per-SM, shares hardware budget with SMEM. The combined L1+SMEM is 228 KiB on Hopper/Blackwell-DC, 128 KiB on Blackwell-WS. The split between L1 and SMEM is dynamic; the SMEM carveout you request determines L1 size.
+**L1**：每 SM 一份，与 SMEM 共用硬件预算。L1+SMEM 合计在 Hopper/数据中心版 Blackwell 上是 228 KiB，在工作站 Blackwell 上是 128 KiB（译注：Hopper 每 SM 的 L1+SMEM 合计实际为 256 KB，228 KiB 是 SMEM 可配置的最大值）。L1 与 SMEM 之间的划分是动态的；你申请的 SMEM 划分量决定了 L1 的大小。
 
-**L2**: device-wide, 40 MB on H100, 50 MB on B100, ~96 MB on B200, somewhat smaller on consumer Blackwell. L2 caches accesses to global memory, hides some HBM latency.
+**L2**：全设备共享，H100 上 40 MB，B100 上 50 MB，B200 上约 96 MB，消费级 Blackwell 上略小一些。L2 缓存对全局内存的访问，掩盖一部分 HBM 延迟。
 
-Caches are mostly automatic; you don't manage them directly. Cache control hints (`ld.cg`, `ld.cs`, `ld.ca`) let you bias the hierarchy slightly.
+缓存基本是自动的，你不直接管理它们。缓存控制提示（`ld.cg`、`ld.cs`、`ld.ca`）可以让你对层级行为稍加引导。
 
-### Global memory (HBM / GDDR)
+### 全局内存（HBM / GDDR）
 
-Off-chip device memory. The deepest, slowest, largest tier.
+片外设备内存。最深、最慢、最大的一层。
 
-| GPU | Memory | Capacity | Bandwidth |
+| GPU | 内存类型 | 容量 | 带宽 |
 | --- | --- | ---: | ---: |
 | A100 80GB | HBM2e | 80 GB | 2.0 TB/s |
 | H100 80GB | HBM3 | 80 GB | 3.4 TB/s |
@@ -92,54 +92,54 @@ Off-chip device memory. The deepest, slowest, largest tier.
 | RTX PRO 6000 Workstation | GDDR7 | 96 GB | ~1.8 TB/s |
 | RTX 5090 | GDDR7 | 32 GB | ~1.8 TB/s |
 
-The bandwidth gap between datacenter HBM and consumer GDDR is roughly **4–5×**. For memory-bound workloads (which long-context decode largely is) this is one of the architectural performance gaps that no software bridge can close.
+数据中心 HBM 与消费级 GDDR 之间的带宽差距大约是 **4–5 倍**。对访存受限的负载（长上下文 decode 基本就是这类）来说，这是软件手段无法弥补的架构性能差距之一。
 
-Access patterns matter: a fully **coalesced** access (32 threads in a warp accessing a contiguous 128-byte segment) achieves peak bandwidth. A scattered or strided access can drop to a small fraction of peak. The HBM/GDDR bandwidth numbers above are peak; achievable bandwidth depends on your access pattern.
+访问模式很关键：完全**合并**的访问（一个 warp 的 32 个线程访问连续的 128 字节段）能达到峰值带宽。分散或跨步访问可能只剩峰值的一小部分。上表的 HBM/GDDR 带宽都是峰值；实际能拿到多少取决于你的访问模式。
 
-## A concrete sizing example
+## 一个具体的算例
 
-Suppose you're writing a CUTLASS GEMM at NVFP4 with tile shape `m128n128k64`:
+假设你在写一个 NVFP4 精度的 CUTLASS GEMM，tile 形状为 `m128n128k64`：
 
-- **Operands**: `A` is 128×64 = 8192 elements at 4 bits = 4096 bytes (plus scales). `B` is 64×128 = 4096 bytes. Total operand size per tile: ~9 KB.
-- **Pipeline stages**: to overlap loads with compute, you'd typically allocate 3–4 stages of operands in SMEM. 4 stages × 9 KB = 36 KB.
-- **Accumulator**: 128×128 × 4 bytes (FP32 accum) = 64 KB. On SM100, this lives in TMEM. On SM120, it must live in registers (which it doesn't fit) or SMEM (which would push the budget to 36 + 64 = 100 KB — *over* the 99 KiB ceiling).
+- **操作数**：`A` 是 128×64 = 8192 个元素，每个 4 位，即 4096 字节（另加缩放因子）。`B` 是 64×128 = 4096 字节。每个 tile 的操作数合计约 9 KB。
+- **流水线级数**：为了让加载与计算重叠，通常会在 SMEM 里放 3–4 级操作数。4 级 × 9 KB = 36 KB。
+- **累加器**：128×128 × 4 字节（FP32 累加）= 64 KB。在 SM100 上它放在 TMEM 里。在 SM120 上它只能放寄存器（放不下）或 SMEM（预算会涨到 36 + 64 = 100 KB——*超过*了 99 KiB 的上限）。
 
-This is the SMEM cliff in concrete form. The CUTLASS Blackwell templates handle it via TMEM on SM100, leaving the SMEM budget for operands. Without TMEM, the template's `StageCountAutoCarveout` underestimates available SMEM, allocates too aggressively, and the launch corrupts adjacent banks.
+这就是 SMEM 断崖的具体形态。CUTLASS 的 Blackwell 模板在 SM100 上靠 TMEM 解决它，SMEM 预算全留给操作数。没有 TMEM 时，模板的 `StageCountAutoCarveout` 会低估可用 SMEM，分配得过于激进，启动后就会破坏相邻的 bank。
 
-## Memory access PTX
+## 访存相关的 PTX
 
-Three flavors of load instructions, ordered by scope:
-
-```ptx
-ld.global.u32 %r0, [%addr];   // global memory load
-ld.shared.u32 %r0, [%addr];   // SMEM load
-ld.local.u32  %r0, [%addr];   // thread-local memory load (reg spill)
-```
-
-For Tensor Core work, additional specialized loads exist:
+三种加载指令，按范围排列：
 
 ```ptx
-ldmatrix.sync.aligned.x4.shared.b16  ...   // load matrix tile from SMEM (Ampere+)
-cp.async.ca.shared.global             ...   // async copy global→SMEM (Ampere+)
-cp.async.bulk.tensor.shared::cluster.global ... // TMA (Hopper+, datacenter)
-tcgen05.cp.shared::cta::tmem.b64      ...   // TMEM copy (datacenter Blackwell only)
+ld.global.u32 %r0, [%addr];   // 全局内存加载
+ld.shared.u32 %r0, [%addr];   // SMEM 加载
+ld.local.u32  %r0, [%addr];   // 线程本地内存加载（寄存器溢出）
 ```
 
-The set of available memory instructions narrows significantly on SM120 compared to SM100. Specifically, **TMEM copies, cluster-shared TMA, and `tcgen05.cp` are absent on SM120**.
+面向 Tensor Core 的工作还有一些专用加载指令：
 
-## Checkpoint
+```ptx
+ldmatrix.sync.aligned.x4.shared.b16  ...   // 从 SMEM 加载矩阵 tile（Ampere+）
+cp.async.ca.shared.global             ...   // 异步拷贝 全局→SMEM（Ampere+）
+cp.async.bulk.tensor.shared::cluster.global ... // TMA（Hopper+，数据中心版）
+tcgen05.cp.shared::cta::tmem.b64      ...   // TMEM 拷贝（仅数据中心版 Blackwell）
+```
 
-You should be able to answer:
+与 SM100 相比，SM120 上可用的访存指令集明显缩水。具体来说，**TMEM 拷贝、簇级共享的 TMA，以及 `tcgen05.cp` 在 SM120 上都不存在**。
 
-- What's the per-block SMEM ceiling on workstation Blackwell? On datacenter Blackwell?
-- Why does SM100's TMEM exist? What does SM120 do instead?
-- What does it mean for a memory access to be coalesced?
-- Roughly what's the bandwidth ratio between datacenter HBM3e and workstation GDDR7?
-- Why is the L1+SMEM split sometimes called a "carveout"?
+## 自测
 
-## See also
+读完你应该能回答：
 
-- [`gpu-execution-model`](gpu-execution-model.md) — how threads/warps/CTAs interact with this hierarchy
-- [`tensor-cores`](tensor-cores.md) — what consumes the Tensor Memory tier
-- [`blackwell/sm100-vs-sm120`](../blackwell/sm100-vs-sm120.md) — detailed treatment of the SMEM and TMEM differences
-- NVIDIA *CUDA C++ Programming Guide*, ch. 6 (Memory Hierarchy)
+- 工作站 Blackwell 每 block 的 SMEM 上限是多少？数据中心版呢？
+- SM100 的 TMEM 为什么存在？SM120 用什么代替？
+- 一次内存访问"合并"是什么意思？
+- 数据中心 HBM3e 与工作站 GDDR7 的带宽比大致是多少？
+- 为什么 L1+SMEM 的划分有时被叫作"carveout"？
+
+## 另见
+
+- [`gpu-execution-model`](gpu-execution-model.md) — 线程/warp/CTA 怎样与这套层级打交道
+- [`tensor-cores`](tensor-cores.md) — 谁在消费 Tensor Memory 这一层
+- [`blackwell/sm100-vs-sm120`](../blackwell/sm100-vs-sm120.md) — SMEM 与 TMEM 差异的详细讨论
+- NVIDIA *CUDA C++ Programming Guide* 第 6 章（Memory Hierarchy）

@@ -1,135 +1,135 @@
-# Thread block clusters
+# 线程块簇（thread block cluster）
 
-The unit between a CTA and a grid. Introduced with Hopper, expanded on datacenter Blackwell, **absent on workstation Blackwell**. A surprisingly common cause of kernels that "compile and launch" but produce wrong outputs.
+介于 CTA 和 grid 之间的一级调度单位。Hopper 引入，数据中心版 Blackwell 上扩大了规模，**工作站版 Blackwell 上没有**。它是"能编译、能启动、结果却是错的"这类 kernel 问题中出乎意料常见的一个根源。
 
-## What a cluster is
+## cluster 是什么
 
-A **cluster** is a group of CTAs that:
+一个 **cluster** 是一组 CTA，它们：
 
-- Are **co-scheduled** onto SMs that share a *cluster shared memory* address space
-- Can **synchronize** via `cluster.sync`
-- Can **address** each other's SMEM via cluster-shared addressing
-- Can issue **cluster-wide TMA** that deposits a tensor tile across all participating CTAs' SMEMs in a single op
+- 被**协同调度**到一组共享 *cluster 共享内存* 地址空间的 SM 上
+- 可以通过 `cluster.sync` 互相**同步**
+- 可以通过 cluster 共享寻址**访问**彼此的 SMEM
+- 可以发射 **cluster 级 TMA**，一条操作就把一个张量 tile 分发到所有参与 CTA 的 SMEM 里
 
-Cluster size is declared at kernel launch:
+cluster 大小在 kernel 启动时声明：
 
 ```cpp
 __global__ __cluster_dims__(2, 1, 1) void my_kernel(...) { ... }
 ```
 
-Or in PTX:
+或者在 PTX 里：
 
 ```ptx
 .cluster_dim 2,1,1
 ```
 
-The launch-time cluster shape determines how many CTAs participate. Each CTA in the cluster has a `clusterIdx` and can address other CTAs by their cluster-relative index.
+启动时的 cluster 形状决定有多少个 CTA 参与。cluster 里的每个 CTA 都有一个 `clusterIdx`，可以用 cluster 内的相对索引访问其他 CTA。
 
-## Why clusters exist
+## 为什么需要 cluster
 
-For modern Tensor Core kernels, a single CTA's SMEM (228 KiB on Hopper / SM100) is sometimes too small to hold:
+对现代 Tensor Core kernel 来说，单个 CTA 的 SMEM（Hopper / SM100 上是 228 KiB）有时装不下这些东西：
 
-- Operand A staging (multiple pipeline stages)
-- Operand B staging (multiple pipeline stages)
-- Accumulator (large for big tiles)
-- Pipeline state (mailboxes, mbarriers)
+- 操作数 A 的暂存区（多级流水线）
+- 操作数 B 的暂存区（多级流水线）
+- 累加器（大 tile 时很大）
+- 流水线状态（邮箱、mbarrier）
 
-A cluster lets two or more CTAs **pool their SMEM** for a single logical kernel tile. The cluster-shared addressing means CTA-0's TMA can deposit operand A directly into CTA-1's SMEM bank — no copy through global memory needed.
+cluster 让两个或更多 CTA 为同一个逻辑 kernel tile **合并各自的 SMEM**。有了 cluster 共享寻址，CTA-0 发的 TMA 可以把操作数 A 直接放进 CTA-1 的 SMEM——不需要经过全局内存中转。
 
-For `tcgen05.mma.cta_group::2`, clustering is **mandatory**: the largest MMA tile (m256n128k64) requires two CTAs cooperating, since neither alone has enough TMEM.
+对 `tcgen05.mma.cta_group::2` 来说，cluster 是**必需的**：最大的 MMA tile（m256n128k64）需要两个 CTA 协作，因为任何一个 CTA 单独都没有足够的 TMEM。
 
-## Cluster sizes by architecture
+## 各架构的 cluster 大小
 
-| Architecture | Max cluster size |
+| 架构 | 最大 cluster 大小 |
 | --- | --- |
-| Volta (SM 7.0) – Ampere (SM 8.x) | 1 (no clusters) |
-| Hopper (SM 9.0) | up to 8 (typical), 16 (with portable cluster size opt-in) |
-| Blackwell datacenter (SM 10.0) | up to 16 |
-| Blackwell workstation (SM 12.0) | **1 (no clusters)** |
+| Volta（SM 7.0）– Ampere（SM 8.x） | 1（没有 cluster） |
+| Hopper（SM 9.0） | 最多 8（常规），16（显式开启"可移植 cluster 大小"选项后；译注：CUDA 里该属性实为 `cudaFuncAttributeNonPortableClusterSizeAllowed`，即"非可移植"） |
+| 数据中心版 Blackwell（SM 10.0） | 最多 16 |
+| 工作站版 Blackwell（SM 12.0） | **1（没有 cluster）** |
 
-The SM120 case is the one that bites: a kernel compiled for `sm_120` with `.cluster_dim 2,1,1` will:
+SM120 这一行就是坑所在：一个带 `.cluster_dim 2,1,1`、为 `sm_120` 编译的 kernel 会：
 
-1. Compile successfully (the `.cluster_dim` directive is accepted by `ptxas`)
-2. Load successfully on the device
-3. Launch with the cluster dim **silently downgraded to (1,1,1)**
-4. If the kernel uses `cluster.sync` or cluster-shared SMEM addressing, **deadlock** or **read garbage**
+1. 编译成功（`ptxas` 接受 `.cluster_dim` 指示符）
+2. 在设备上加载成功
+3. 启动时 cluster 维度**被悄悄降成 (1,1,1)**
+4. 如果 kernel 用到 `cluster.sync` 或 cluster 共享 SMEM 寻址，就会**死锁**或**读到垃圾数据**
 
-This is one of the silent-failure classes from [`sm100-vs-sm120`](sm100-vs-sm120.md).
+这是 [`sm100-vs-sm120`](sm100-vs-sm120.md) 里列出的静默失败类型之一。
 
-## Cluster-related PTX
+## 与 cluster 相关的 PTX
 
-### Synchronization
-
-```ptx
-cluster.sync.aligned;            // barrier across all CTAs in cluster
-cluster.arrive.aligned %sema;     // arrive on a cluster mbarrier
-cluster.wait.aligned %sema;       // wait on a cluster mbarrier
-```
-
-`cluster.sync` is a cluster-wide barrier. All CTAs in the cluster must reach it; once they all do, all proceed. On SM120 with cluster size 1, `cluster.sync` is a no-op (only one CTA, it just continues), so a kernel that uses it as a sync between CTAs is silently broken.
-
-### Addressing
+### 同步
 
 ```ptx
-ld.shared::cluster.b32 %r0, [%addr];   // load from another CTA's SMEM in same cluster
-st.shared::cluster.b32 [%addr], %r0;   // store to another CTA's SMEM
+cluster.sync.aligned;            // cluster 内所有 CTA 的屏障
+cluster.arrive.aligned %sema;     // 在 cluster mbarrier 上 arrive
+cluster.wait.aligned %sema;       // 在 cluster mbarrier 上 wait
 ```
 
-These reach across SMEMs of co-located SMs. The address space (`shared::cluster`) is wider than per-CTA SMEM. On SM120, `shared::cluster` accesses fall back to local SMEM (because there's no other CTA to address) — accessing a "cluster-shared" address that maps to another CTA's SMEM produces garbage.
+`cluster.sync` 是 cluster 级屏障。cluster 里所有 CTA 都必须到达；全部到齐后一起继续。在 SM120 上 cluster 大小为 1，`cluster.sync` 就是个空操作（只有一个 CTA，直接往下走），所以靠它做 CTA 间同步的 kernel 会悄无声息地出错。
 
-### Cluster TMA
+### 寻址
+
+```ptx
+ld.shared::cluster.b32 %r0, [%addr];   // 从同一 cluster 里另一个 CTA 的 SMEM 读
+st.shared::cluster.b32 [%addr], %r0;   // 写入另一个 CTA 的 SMEM
+```
+
+这些指令跨越同址 SM 的 SMEM。`shared::cluster` 地址空间比单 CTA 的 SMEM 更宽。在 SM120 上，`shared::cluster` 访问会回退到本地 SMEM（因为没有别的 CTA 可访问）——访问一个本该映射到另一个 CTA SMEM 的"cluster 共享"地址，得到的是垃圾数据。
+
+### cluster TMA
 
 ```ptx
 cp.async.bulk.tensor.shared::cluster.global ...;
 ```
 
-Single-instruction asynchronous tensor-tile copy from global memory into cluster-shared SMEM, distributing portions across the participating CTAs. SM100 supports this; SM120 does not (`cp.async.bulk.tensor.shared::cta` only).
+单条指令把张量 tile 从全局内存异步拷贝到 cluster 共享 SMEM，并分片放到各参与 CTA 里。SM100 支持；SM120 不支持（只有 `cp.async.bulk.tensor.shared::cta`）。
 
-## Detecting cluster use in a kernel
+## 检测 kernel 是否用了 cluster
 
-To check whether a precompiled kernel uses clusters > 1:
+要检查一个预编译 kernel 是否用了大于 1 的 cluster：
 
 ```bash
 cuobjdump --dump-elf-symbols mylib.so | grep -i cluster
 
-# Or in dumped PTX:
+# 或者在导出的 PTX 里找：
 cuobjdump --dump-ptx mylib.so | grep -E 'cluster_dim|cluster\.sync|shared::cluster'
 ```
 
-If you see `cluster_dim 2,1,1` or higher, or any `cluster.sync` instruction, the kernel relies on cluster cooperation. Running it on SM120 will likely fail subtly.
+如果看到 `cluster_dim 2,1,1` 或更大的值，或者任何 `cluster.sync` 指令，说明这个 kernel 依赖 cluster 协作。在 SM120 上跑多半会以不易察觉的方式出错。
 
-## When kernels don't actually need their declared cluster
+## kernel 其实不需要它声明的 cluster 的情况
 
-Some kernels declare `cluster_dim 2,1,1` for performance reasons (cluster-shared TMA bandwidth) but don't logically require cluster cooperation. For these, a port to SM120 is feasible: rewrite the kernel to use cluster size 1 and direct SMEM staging instead of cluster-shared TMA. The kernel is slower but correct.
+有些 kernel 声明 `cluster_dim 2,1,1` 只是为了性能（利用 cluster 共享 TMA 的带宽），逻辑上并不需要 CTA 之间协作。这类 kernel 移植到 SM120 是可行的：把 kernel 改成 cluster 大小为 1，用直接的 SMEM 暂存代替 cluster 共享 TMA。会变慢，但结果正确。
 
-CUTLASS's SM100-targeted templates often fall into this category. The SM120-targeted templates exist precisely to provide the non-cluster equivalents.
+CUTLASS 面向 SM100 的模板很多都属于这一类。面向 SM120 的模板存在的意义正是提供不用 cluster 的等价实现。
 
-## When kernels truly need their declared cluster
+## kernel 真的需要它声明的 cluster 的情况
 
-A `tcgen05.mma.cta_group::2` issuing CTA-pair MMA absolutely requires cluster size 2 — there's no single-CTA equivalent for the m256-class tiles. Kernels that depend on these need to be rewritten to use the smaller m128-class single-CTA tiles (or even smaller `mma.sync` tiles). The rewrite isn't mechanical; tile shape choice is intertwined with tiling strategy.
+用 `tcgen05.mma.cta_group::2` 发射 CTA pair MMA 的 kernel 绝对需要 cluster 大小为 2——m256 这一档的 tile 没有单 CTA 的等价物。依赖这些 tile 的 kernel 必须改写成用较小的 m128 档单 CTA tile（甚至更小的 `mma.sync` tile）。这个改写不是机械替换；tile 形状的选择和分块策略是缠在一起的。
 
-## A historical note
+## 一点历史
 
-Thread block clusters were introduced with Hopper as a way to scale Tensor Core work beyond a single SM's resources. They're a relatively new programming abstraction (pre-2022 there was no equivalent). The Hopper API exposed them via `cooperative_groups::cluster_group`; CUDA C++ supports them via `__cluster_dims__`.
+线程块簇随 Hopper 引入，用来把 Tensor Core 工作扩展到单个 SM 的资源之外。它是一个相当新的编程抽象（2022 年之前没有对应的东西）。Hopper 的 API 通过 `cooperative_groups::cluster_group` 暴露它；CUDA C++ 通过 `__cluster_dims__` 支持它。
 
-The fact that consumer Blackwell *removed* clusters is unusual — typically NVIDIA preserves features once introduced. The likely reason: cluster cooperation requires extra SM-to-SM hardware linkage (the cluster-shared SMEM bus) that the GB202 die intentionally omits to save area.
+消费级 Blackwell *去掉* cluster 这件事很不寻常——NVIDIA 通常会保留已经引入的特性。可能的原因是：cluster 协作需要额外的 SM 到 SM 硬件连接（cluster 共享 SMEM 总线），GB202 芯片为了省面积有意省掉了它。
 
-The result: code written assuming Hopper-or-newer cluster support unexpectedly fails on SM120, even though its compute capability (12.0) is *newer* than Hopper (9.0). This is the rare case where a higher CC number doesn't strictly include all the features of a lower CC number — which violates a normally reliable assumption.
+结果就是：按"Hopper 或更新的架构都支持 cluster"这一假设写的代码，在 SM120 上会意外失败，尽管它的计算能力（12.0）比 Hopper（9.0）*更新*。这是少见的例子——更高的 CC 编号并没有严格包含更低 CC 编号的全部特性，打破了一个通常很可靠的假设。
 
-## Checkpoint
+## 自测
 
-You should be able to answer:
+你应该能回答：
 
-- What's a cluster, and how is it different from a grid or a CTA?
-- What's the maximum cluster size on SM100? On SM120?
-- What happens when you launch a kernel with `cluster_dim 2,1,1` on SM120?
-- Why does `tcgen05.mma.cta_group::2` require clusters?
-- How do you detect, from a compiled binary, whether a kernel uses clusters?
+- cluster 是什么？它和 grid、CTA 有什么区别？
+- SM100 上最大 cluster 是多少？SM120 上呢？
+- 在 SM120 上启动一个 `cluster_dim 2,1,1` 的 kernel 会发生什么？
+- 为什么 `tcgen05.mma.cta_group::2` 需要 cluster？
+- 怎么从编译好的二进制判断一个 kernel 用没用 cluster？
 
-## See also
+## 另见
 
-- [`tcgen05-and-tmem`](tcgen05-and-tmem.md) — `tcgen05.mma.cta_group::2` and CTA-pair execution
-- [`sm100-vs-sm120`](sm100-vs-sm120.md) — the broader architecture diff
-- [`compatibility/cluster-rewriting`](../compatibility/cluster-rewriting.md) — porting patterns
-- *NVIDIA PTX ISA 8.5*, sections on `.cluster_dim`, `cluster.sync`, `shared::cluster`
-- *CUDA C++ Programming Guide*, "Thread Block Clusters"
+- [`tcgen05-and-tmem`](tcgen05-and-tmem.md) —— `tcgen05.mma.cta_group::2` 与 CTA pair 执行
+- [`sm100-vs-sm120`](sm100-vs-sm120.md) —— 更全面的架构差异
+- [`compatibility/cluster-rewriting`](../compatibility/cluster-rewriting.md) —— 移植套路
+- *NVIDIA PTX ISA 8.5*，关于 `.cluster_dim`、`cluster.sync`、`shared::cluster` 的章节
+- *CUDA C++ Programming Guide*，"Thread Block Clusters"一节

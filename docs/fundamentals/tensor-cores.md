@@ -1,150 +1,150 @@
-# Tensor Cores
+# Tensor Core
 
-Specialized execution units inside each SM that perform matrix-multiply-accumulate (MMA) operations on small tiles in a single instruction. The reason GPUs are useful for transformer inference.
+每个 SM 内部的专用执行单元，一条指令就能对一小块 tile 完成矩阵乘累加（MMA）。GPU 之所以适合跑 transformer 推理，原因就在这里。
 
-## What they do, and why
+## 它做什么，为什么要有它
 
-A normal warp-level instruction operates on 32 32-bit elements in parallel — 32 SIMT lanes, one element each. A Tensor Core instruction operates on a **matrix tile**: a small block of 16×8 or 16×16 elements, computing the entire `D = A · B + C` for that tile in a single op.
+一条普通的 warp 级指令并行处理 32 个 32 位元素——32 个 SIMT lane，每个 lane 一个元素。而一条 Tensor Core 指令处理的是一个**矩阵 tile**：一小块 16×8 或 16×16 的元素，一条指令就算完这个 tile 的整个 `D = A · B + C`。
 
-Throughput improves substantially. For BF16 inputs and FP32 accumulator on Hopper:
+吞吐提升非常可观。以 Hopper 上 BF16 输入、FP32 累加器为例：
 
-- Plain FP32 FMA: ~30 TFLOPs/GPU
-- BF16 Tensor Core MMA: ~990 TFLOPs/GPU
+- 普通 FP32 FMA：约 30 TFLOPs/GPU
+- BF16 Tensor Core MMA：约 990 TFLOPs/GPU
 
-Roughly 30×. For FP4 on Blackwell datacenter the speedup is even greater (~165× over plain FP32).
+差不多 30 倍。数据中心版 Blackwell 上跑 FP4，加速比更大（相对普通 FP32 约 165 倍）。
 
-The Tensor Core itself is invisible to the programmer beyond a special instruction. There's no separate "Tensor Core memory" (well, there is now — TMEM, but that's an SM100 thing — see below) — operands come from registers (or SMEM, or TMEM), results land in registers (or TMEM).
+对程序员来说，Tensor Core 本身是不可见的，只表现为一条特殊指令。它没有单独的"Tensor Core 内存"（好吧，现在有了——TMEM，但那是 SM100 的东西，见下文）——操作数来自寄存器（或 SMEM、或 TMEM），结果落到寄存器（或 TMEM）。
 
-## The five generations
+## 五代 Tensor Core
 
-| Gen | Architecture | Compute capability | Key features |
+| 代 | 架构 | 计算能力 | 关键特性 |
 | --- | --- | --- | --- |
-| 1 | Volta | 7.0 (V100) | FP16 input, FP32 accum. `mma.sync` introduced. |
-| 2 | Turing | 7.5 (T4, RTX 20) | + INT8, INT4, INT1 |
-| 3 | Ampere | 8.0–8.9 (A100, RTX 30) | + BF16, TF32. `ldmatrix` for fast SMEM loads. |
-| 4 | Hopper | 9.0 (H100/H200) | + FP8 (E4M3, E5M2). `wgmma.async` (warp-group async MMA). TMA. Thread block clusters. |
-| 5 | Blackwell | 10.0 / 12.0 | + FP6, FP4, MX-FP4, NVFP4. `tcgen05` family (SM100 only). TMEM (SM100 only). |
+| 1 | Volta | 7.0（V100） | FP16 输入，FP32 累加。引入 `mma.sync`。 |
+| 2 | Turing | 7.5（T4、RTX 20） | + INT8、INT4、INT1 |
+| 3 | Ampere | 8.0–8.9（A100、RTX 30） | + BF16、TF32。`ldmatrix` 用于快速加载 SMEM。 |
+| 4 | Hopper | 9.0（H100/H200） | + FP8（E4M3、E5M2）。`wgmma.async`（warp 组异步 MMA）。TMA。线程块簇。 |
+| 5 | Blackwell | 10.0 / 12.0 | + FP6、FP4、MX-FP4、NVFP4。`tcgen05` 指令族（仅 SM100）。TMEM（仅 SM100）。 |
 
-This wiki is mostly about generation 5. The earlier generations are mentioned for context — you'll see references to `mma.sync` and `wgmma.async` in modern kernel code, especially as fallback paths.
+本 wiki 主要讲第 5 代。前几代提一下是为了铺垫背景——你会在现代 kernel 代码里看到 `mma.sync` 和 `wgmma.async`，尤其是作为回退路径。
 
-## The MMA instruction families
+## MMA 指令族
 
-Three relevant families. All are PTX-level constructs; you rarely write them directly in CUDA C++ but you'll see them in compiled PTX and in CUTLASS templates.
+三个相关的指令族。它们都是 PTX 层面的东西；你很少在 CUDA C++ 里直接写它们，但在编译出来的 PTX 和 CUTLASS 模板里会经常见到。
 
-### `mma.sync` — universal, since Volta
+### `mma.sync`——通用，自 Volta 起
 
 ```ptx
 mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32  %rd0, %rd1, %rd2, %rd3;
 //                ^^^^^^^^^         ^^^^ ^^^^ ^^^^
-//                tile shape         A     B    C/D
-//                                  type type type
+//                tile 形状          A     B    C/D
+//                                  类型  类型  类型
 ```
 
-Parses as: "synchronously perform an MMA on a m16n8k16 tile (16 rows, 8 cols, 16 inner-product depth), with row-major A and col-major B, A and B in BF16, accumulator in FP32, output in registers `%rd0`, operands in `%rd1`, `%rd2`, `%rd3`."
+读作："同步地对一个 m16n8k16 的 tile（16 行、8 列、内积深度 16）做 MMA，A 行主序、B 列主序，A 和 B 是 BF16，累加器是 FP32，输出在寄存器 `%rd0`，操作数在 `%rd1`、`%rd2`、`%rd3`。"
 
-Properties:
+特点：
 
-- **Synchronous**: warp issues the instruction and **all 32 threads in the warp must participate**. Result is in registers immediately.
-- **Small tiles**: m16n8k16 (BF16/FP16), m16n8k32 (FP8/FP4). Larger logical tiles are issued as multiple `mma.sync` instructions in sequence.
-- **Universal**: works on every NVIDIA GPU from Volta forward. **Works on both SM100 and SM120.**
+- **同步**：warp 发射这条指令，**warp 里全部 32 个线程都必须参与**。结果立刻就在寄存器里。
+- **tile 小**：m16n8k16（BF16/FP16）、m16n8k32（FP8/FP4）。更大的逻辑 tile 要拆成多条 `mma.sync` 依次发射。
+- **通用**：从 Volta 起每一代 NVIDIA GPU 都支持。**SM100 和 SM120 都能跑。**
 
-Roughly the workhorse of all tensor-core code from Volta through Ampere, and the fallback path on every architecture. Most PTX you see in practice contains `mma.sync` instructions.
+从 Volta 到 Ampere，它差不多是所有 Tensor Core 代码的主力，也是每一代架构上的回退路径。实践中看到的大多数 PTX 里都有 `mma.sync`。
 
-### `wgmma.async` — Hopper introduction
+### `wgmma.async`——Hopper 引入
 
 ```ptx
 wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16  %rd0, %rd1, %rd2, %rd3;
 ```
 
-Properties:
+特点：
 
-- **Asynchronous**: warp issues the instruction, continues executing other work; result lands later. Synchronization via `wgmma.commit_group.sync` and `wgmma.wait_group.sync`.
-- **Warp-group**: a *warp group* is 4 warps (128 threads). The MMA is issued by the warp group, not a single warp.
-- **Larger tiles**: m64n128k16 to m64n256k16, vs. mma.sync's m16n8k16. Fewer instructions issued for the same logical work.
-- **Hopper and Hopper-aware Blackwell**: works on SM 9.0 and on SM 10.0 (datacenter Blackwell). **On SM 12.0 it works but Tensor Core throughput is lower than on datacenter parts.**
+- **异步**：warp 发射指令后继续干别的活；结果稍后才落地。通过 `wgmma.commit_group.sync` 和 `wgmma.wait_group.sync` 同步。
+- **warp 组**：一个 *warp 组*是 4 个 warp（128 线程）。MMA 由整个 warp 组发射，而不是单个 warp。
+- **tile 更大**：从 m64n128k16 到 m64n256k16，而 mma.sync 只有 m16n8k16。同样的逻辑工作量，发射的指令更少。
+- **Hopper 以及兼容 Hopper 的 Blackwell**：SM 9.0 和 SM 10.0（数据中心版 Blackwell）都能跑。**SM 12.0 上也能跑，但 Tensor Core 吞吐低于数据中心版。**（译注：按 NVIDIA PTX ISA，`wgmma` 只在 `sm_90a` 上可用，SM100/SM120 并不支持，原文此处与 NVIDIA 官方文档不一致。）
 
-`wgmma.async` introduced async-everything-on-the-warp-group. Modern Hopper kernels (FA-3, CUTLASS Hopper templates) lean heavily on it.
+`wgmma.async` 开启了"warp 组上一切皆异步"的时代。现代 Hopper kernel（FA-3、CUTLASS 的 Hopper 模板）都重度依赖它。
 
-### `tcgen05.mma` — Blackwell datacenter only
+### `tcgen05.mma`——仅限数据中心版 Blackwell
 
 ```ptx
 tcgen05.mma.cta_group::1.kind::f4 [%tmem_d], [%tmem_a], [%tmem_b], %scale_a, %scale_b;
 //          ^^^^^^^^^^^^ ^^^^^^^^
-//          single CTA   FP4 inputs
+//          单 CTA        FP4 输入
 ```
 
-Properties:
+特点：
 
-- **Asynchronous + decoupled**: even more so than `wgmma`. Operands and result are addressed by **TMEM addresses**, not registers. Issuing the instruction takes effectively zero time on the issuing warp.
-- **Larger tiles**: up to m128n128k64 single-CTA, m256n128k64 CTA-pair (with `cta_group::2`).
-- **CTA-pair / cluster-2 mode**: two CTAs cooperate via cluster-shared memory and TMEM to issue a single MMA over a larger tile. Requires `.cluster_dim 2,1,1`. **SM100 only.**
-- **Companion ops**: `tcgen05.alloc` for TMEM allocation, `tcgen05.commit` for completion barrier, `tcgen05.cp` for TMEM-to-SMEM copy-out.
-- **SM100 only.** **Does not work on SM120.**
+- **异步且解耦**：比 `wgmma` 更彻底。操作数和结果都用 **TMEM 地址**寻址，而不是寄存器。对发射它的 warp 来说，发射这条指令几乎不花时间。
+- **tile 更大**：单 CTA 最大 m128n128k64，CTA pair（用 `cta_group::2`）最大 m256n128k64。
+- **CTA pair / 双 CTA cluster 模式**：两个 CTA 通过 cluster 共享内存和 TMEM 协作，对一个更大的 tile 发射一条 MMA。需要 `.cluster_dim 2,1,1`。**仅 SM100。**
+- **配套指令**：`tcgen05.alloc` 分配 TMEM，`tcgen05.commit` 做完成屏障，`tcgen05.cp` 把 TMEM 拷出到 SMEM。
+- **仅 SM100。** **SM120 上不能用。**
 
-The reason `tcgen05` exists is that at FP4/FP6 throughput levels, the warp-group MMA approach starts to bottleneck on register file bandwidth — the warp can't issue MMA instructions fast enough to keep the Tensor Core busy. By moving accumulators out of registers and into TMEM, the warp issues one `tcgen05.mma`, the Tensor Core runs to completion in TMEM, and the warp can do other work in parallel.
+`tcgen05` 之所以存在，是因为到了 FP4/FP6 这种吞吐水平，warp 组 MMA 的做法开始卡在寄存器堆带宽上——warp 发射 MMA 指令的速度跟不上 Tensor Core 的消耗速度。把累加器从寄存器搬到 TMEM 之后，warp 发射一条 `tcgen05.mma`，Tensor Core 就在 TMEM 里一路算完，warp 可以同时去干别的。
 
-This deep coupling is why `tcgen05` is *not* a simple ISA addition — the entire kernel-design pattern around it (TMEM allocation, async commits, TMA-into-TMEM copies) is its own ecosystem.
+正因为这种深度耦合，`tcgen05` *不是*简单地往 ISA 里加几条指令——围绕它的整套 kernel 设计模式（TMEM 分配、异步 commit、TMA 直接拷进 TMEM）自成一个生态。
 
-## What runs on what
+## 什么能跑在什么上
 
-| Instruction family | SM 7.x | SM 8.x | SM 9.0 | SM 10.0 | SM 12.0 |
+| 指令族 | SM 7.x | SM 8.x | SM 9.0 | SM 10.0 | SM 12.0 |
 | --- | :---: | :---: | :---: | :---: | :---: |
 | `mma.sync` | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `wgmma.async` | | | ✓ | ✓ | ✓¹ |
-| `tcgen05.mma` (single CTA) | | | | ✓ | |
-| `tcgen05.mma` (CTA-pair) | | | | ✓ | |
+| `tcgen05.mma`（单 CTA） | | | | ✓ | |
+| `tcgen05.mma`（CTA pair） | | | | ✓ | |
 
-¹ Available but Tensor Core throughput is lower; not the optimal path on consumer Blackwell.
+¹ 可用，但 Tensor Core 吞吐更低；在消费级 Blackwell 上不是最优路径。
 
-## How CUTLASS chooses
+## CUTLASS 怎么选
 
-CUTLASS, the reference high-performance GEMM library, has separate template hierarchies for each MMA family:
+CUTLASS 作为高性能 GEMM 的参考库，为每个 MMA 指令族维护了各自独立的模板体系：
 
-- `cutlass/include/cutlass/gemm/collective/sm80_*` — Ampere, `mma.sync`-based
-- `cutlass/include/cutlass/gemm/collective/sm90_*` — Hopper, `wgmma`-based
-- `cutlass/include/cutlass/gemm/collective/sm100_*` — Datacenter Blackwell, `tcgen05`-based
-- `cutlass/include/cutlass/gemm/collective/sm120_*` — Workstation Blackwell, currently `mma.sync`-or-`wgmma`-based
+- `cutlass/include/cutlass/gemm/collective/sm80_*`——Ampere，基于 `mma.sync`
+- `cutlass/include/cutlass/gemm/collective/sm90_*`——Hopper，基于 `wgmma`
+- `cutlass/include/cutlass/gemm/collective/sm100_*`——数据中心版 Blackwell，基于 `tcgen05`
+- `cutlass/include/cutlass/gemm/collective/sm120_*`——工作站版 Blackwell，目前基于 `mma.sync` 或 `wgmma`
 
-When you instantiate a CUTLASS GEMM, you specify the target architecture; the template selects the appropriate MMA family. The SM100 templates target **`sm_100a`** because they need `tcgen05`. The SM120 templates target **`sm_120` or `sm_120f`** and use the older but still effective `mma.sync` / `wgmma` paths.
+实例化一个 CUTLASS GEMM 时，你指定目标架构，模板就会选对应的 MMA 指令族。SM100 模板的目标是 **`sm_100a`**，因为它们需要 `tcgen05`。SM120 模板的目标是 **`sm_120` 或 `sm_120f`**，走的是更老但依然有效的 `mma.sync` / `wgmma` 路径。
 
-This is why a CUTLASS-built library shipped against one target won't run on the other: the actual instructions in the binary are different.
+这就是为什么用 CUTLASS 针对一个目标编出来的库，在另一个目标上跑不了：二进制里的指令本身就不一样。
 
-## Performance perspective
+## 性能视角
 
-At FP4, a single Tensor Core can issue one m128n128k64 MMA per cycle on SM100 — that's 1,048,576 multiply-accumulates per cycle per Tensor Core. A B100 has 144 SMs each with multiple Tensor Cores, yielding ~5 PFLOPs at FP4.
+FP4 精度下，SM100 上一个 Tensor Core 每周期能发射一条 m128n128k64 的 MMA——也就是每个 Tensor Core 每周期 1,048,576 次乘累加。B100 有 144 个 SM，每个 SM 有多个 Tensor Core，FP4 算力约 5 PFLOPs。
 
-On SM120, without `tcgen05`, you fall back to issuing many `mma.sync m16n8k32` ops to do the same work. The arithmetic throughput per Tensor Core is similar — the Tensor Core hardware is the same — but the *scheduling overhead* (more instructions issued, more register file traffic) reduces achievable throughput.
+在 SM120 上，没有 `tcgen05`，同样的工作要退回去发射一大堆 `mma.sync m16n8k32`。单个 Tensor Core 的算术吞吐是差不多的——Tensor Core 硬件本身相同——但*调度开销*（发射的指令更多、寄存器堆流量更大）拉低了实际能达到的吞吐。
 
-A rough rule of thumb: an SM120 GEMM kernel reaches **40–70 % of peak SM100 throughput per FLOP**, and SM120 hardware has fewer SMs and lower clock budget, so the absolute throughput is well below SM100. RTX PRO 6000 Workstation hits ~125 TFLOPs FP4; B100 hits ~5 PFLOPs. **A 40× absolute gap, roughly half hardware and half ISA.**
+一个粗略的经验法则：SM120 上的 GEMM kernel **每 FLOP 只能达到 SM100 峰值的 40–70 %**，再加上 SM120 硬件 SM 数量更少、时钟功耗预算更低，绝对吞吐远低于 SM100。RTX PRO 6000 Workstation 的 FP4 约 125 TFLOPs；B100 约 5 PFLOPs。**绝对差距 40 倍，大致一半来自硬件、一半来自 ISA。**
 
-## Tile shapes commonly seen
+## 常见的 tile 形状
 
-The PTX ISA defines specific allowed tile shapes; libraries instantiate combinations of them. Common ones:
+PTX ISA 规定了允许的 tile 形状；各个库从中挑选组合来实例化。常见的有：
 
-| Family | Tile shape | When |
+| 指令族 | tile 形状 | 场景 |
 | --- | --- | --- |
 | `mma.sync` | m16n8k16 | FP16/BF16 |
 | `mma.sync` | m16n8k32 | FP8/FP4 |
 | `wgmma.async` | m64n{16…256}k{16,32} | Hopper FP16/FP8 |
-| `tcgen05.mma` | m{64,128}n{64,128}k{16,32,64} | Datacenter Blackwell, single-CTA |
-| `tcgen05.mma` | m{128,256}n{64,128}k{16,32,64} | Datacenter Blackwell, CTA-pair |
+| `tcgen05.mma` | m{64,128}n{64,128}k{16,32,64} | 数据中心版 Blackwell，单 CTA |
+| `tcgen05.mma` | m{128,256}n{64,128}k{16,32,64} | 数据中心版 Blackwell，CTA pair |
 
-Tile shape selection trades off: larger tiles amortize instruction-issue overhead, smaller tiles fit more occupancy.
+tile 形状的选择是一种权衡：tile 越大，越能摊薄指令发射开销；tile 越小，占用率越高。
 
-## Checkpoint
+## 自测
 
-You should be able to answer:
+你应该能回答：
 
-- What does `m16n8k16` mean?
-- What's the difference between `mma.sync` and `wgmma.async`?
-- Why does `tcgen05.mma` use TMEM instead of registers for accumulators?
-- What target architecture does CUTLASS use for its datacenter Blackwell templates?
-- Roughly how big is the SM100-vs-SM120 throughput gap at FP4?
+- `m16n8k16` 是什么意思？
+- `mma.sync` 和 `wgmma.async` 有什么区别？
+- `tcgen05.mma` 为什么把累加器放在 TMEM 而不是寄存器里？
+- CUTLASS 的数据中心版 Blackwell 模板用的目标架构是什么？
+- FP4 精度下 SM100 和 SM120 的吞吐差距大概有多大？
 
-## See also
+## 另见
 
-- [`memory-hierarchy`](memory-hierarchy.md) — where Tensor Memory fits
-- [`number-formats`](number-formats.md) — FP4/FP6/FP8/BF16 in detail
-- [`blackwell/tcgen05-and-tmem`](../blackwell/tcgen05-and-tmem.md) — the full datacenter-Blackwell story
-- NVIDIA *PTX ISA* spec, sections on MMA / WGMMA / TCGEN05
-- *CUTLASS* documentation, particularly the "Blackwell architecture" section
+- [`memory-hierarchy`](memory-hierarchy.md)——Tensor Memory 在存储层次里的位置
+- [`number-formats`](number-formats.md)——FP4/FP6/FP8/BF16 详解
+- [`blackwell/tcgen05-and-tmem`](../blackwell/tcgen05-and-tmem.md)——数据中心版 Blackwell 的完整故事
+- NVIDIA *PTX ISA* 规范中 MMA / WGMMA / TCGEN05 相关章节
+- *CUTLASS* 文档，尤其是"Blackwell architecture"一节

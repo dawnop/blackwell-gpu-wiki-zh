@@ -1,142 +1,142 @@
-# Number formats
+# 数值格式
 
-The encoding of every number a Tensor Core multiplies. The diversity of formats is the dominant story of the Hopper-and-Blackwell era.
+Tensor Core 所乘的每一个数是怎么编码的。格式的多样化，是 Hopper 到 Blackwell 这个时代的主线故事。
 
-## The bit-width story
+## 位宽演进
 
 ```mermaid
 graph LR
-    FP32["FP32<br/>32 bits<br/>1962-vintage IEEE"] --> BF16["BF16<br/>16 bits<br/>2018"]
-    FP32 --> FP16["FP16<br/>16 bits<br/>2008"]
-    BF16 --> FP8["FP8<br/>(E4M3, E5M2)<br/>8 bits<br/>2022 H100"]
+    FP32["FP32<br/>32 位<br/>1962 年的 IEEE 老格式"] --> BF16["BF16<br/>16 位<br/>2018"]
+    FP32 --> FP16["FP16<br/>16 位<br/>2008"]
+    BF16 --> FP8["FP8<br/>（E4M3、E5M2）<br/>8 位<br/>2022 H100"]
     FP16 --> FP8
-    FP8 --> FP6["FP6<br/>(E2M3, E3M2)<br/>6 bits<br/>2024 Blackwell"]
-    FP8 --> FP4["FP4 / NVFP4<br/>4-5 bits effective<br/>2024 Blackwell"]
+    FP8 --> FP6["FP6<br/>（E2M3、E3M2）<br/>6 位<br/>2024 Blackwell"]
+    FP8 --> FP4["FP4 / NVFP4<br/>实际 4–5 位<br/>2024 Blackwell"]
 ```
 
-Each generation of formats roughly **halves storage** while retaining usable accuracy for ML workloads. The trick is increasingly aggressive **scaling**: as bit-width drops, dynamic range becomes the bottleneck, so formats partition values into blocks with per-block scale factors.
+每一代格式大致把**存储减半**，同时对 ML 负载仍保留可用的精度。诀窍是越来越激进的**缩放**：位宽降下去以后，动态范围成了瓶颈，所以这些格式把数值分成块，每块配一个缩放因子。
 
-## Floating-point format crash course
+## 浮点格式速成
 
-A floating-point number is `(sign)(2^exponent)(1.mantissa)`, with bias on the exponent. The encoding is **1 + E + M bits** where E is exponent bits and M is mantissa bits. More E → wider range; more M → finer precision.
+一个浮点数是 `(符号)(2^指数)(1.尾数)`，指数带偏置。编码占 **1 + E + M 位**，E 是指数位数，M 是尾数位数。E 越多，范围越宽；M 越多，精度越细。
 
-| Format | Bits | E | M | Range (approx) | Precision (approx) |
+| 格式 | 位数 | E | M | 范围（约） | 精度（约） |
 | --- | ---: | ---: | ---: | --- | --- |
-| FP32 (IEEE 754) | 32 | 8 | 23 | ±10⁻³⁸ to ±10³⁸ | ~7 decimal digits |
-| TF32 (Tensor Core internal) | 19 | 8 | 10 | ±10⁻³⁸ to ±10³⁸ | ~3 decimal digits |
-| FP16 (IEEE 754 binary16) | 16 | 5 | 10 | ±6×10⁻⁵ to ±65 504 | ~3 digits |
-| BF16 (Brain float) | 16 | 8 | 7 | ±10⁻³⁸ to ±10³⁸ | ~2 digits |
-| FP8 E4M3 | 8 | 4 | 3 | ±2⁻⁹ to ±448 | ~1.3 digits |
-| FP8 E5M2 | 8 | 5 | 2 | ±2⁻¹⁶ to ±57 344 | ~1 digit |
-| FP6 E2M3 | 6 | 2 | 3 | ±0.0625 to ±7.5 | ~1 digit |
-| FP6 E3M2 | 6 | 3 | 2 | ±10⁻³ to ±28 | <1 digit |
-| FP4 E2M1 | 4 | 2 | 1 | ±0.5 to ±6 | <1 digit |
+| FP32（IEEE 754） | 32 | 8 | 23 | ±10⁻³⁸ 到 ±10³⁸ | 约 7 位十进制 |
+| TF32（Tensor Core 内部格式） | 19 | 8 | 10 | ±10⁻³⁸ 到 ±10³⁸ | 约 3 位十进制 |
+| FP16（IEEE 754 binary16） | 16 | 5 | 10 | ±6×10⁻⁵ 到 ±65 504 | 约 3 位 |
+| BF16（Brain float） | 16 | 8 | 7 | ±10⁻³⁸ 到 ±10³⁸ | 约 2 位 |
+| FP8 E4M3 | 8 | 4 | 3 | ±2⁻⁹ 到 ±448 | 约 1.3 位 |
+| FP8 E5M2 | 8 | 5 | 2 | ±2⁻¹⁶ 到 ±57 344 | 约 1 位 |
+| FP6 E2M3 | 6 | 2 | 3 | ±0.0625 到 ±7.5 | 约 1 位 |
+| FP6 E3M2 | 6 | 3 | 2 | ±10⁻³ 到 ±28 | 不到 1 位 |
+| FP4 E2M1 | 4 | 2 | 1 | ±0.5 到 ±6 | 不到 1 位 |
 
-A few patterns:
+几个规律：
 
-- **BF16 vs FP16**: same bit count, different split. BF16 trades precision for range — the same exponent range as FP32 means no loss-of-scale issues mid-training. ML quickly standardized on BF16 for training over FP16 for this reason.
-- **FP8 E4M3 vs E5M2**: the E5M2 variant has wider range, used for gradients in training. E4M3 has more precision, used for activations and weights in inference.
-- **FP6 and FP4**: dynamic range becomes laughably small. These formats are useful **only** in block-quantized form with a per-block scale.
+- **BF16 vs FP16**：位数相同，切分不同。BF16 拿精度换范围——指数范围和 FP32 一样，训练中途就不会出现数量级丢失的问题。正因如此，ML 很快就把训练格式从 FP16 统一到了 BF16。
+- **FP8 E4M3 vs E5M2**：E5M2 范围更宽，训练时用于梯度。E4M3 精度更高，推理时用于激活和权重。
+- **FP6 和 FP4**：动态范围小得可笑。这些格式**只有**在块量化形式下、配上每块一个缩放因子才有用。
 
-## Block-quantized formats
+## 块量化格式
 
-For sub-8-bit formats, the value alone doesn't carry enough range. So the format pairs each value with a **scale factor** shared across a block of values:
+对 8 位以下的格式，数值本身的范围不够用。所以格式给每个数值配一个由一整块数值共享的**缩放因子**：
 
 ```
-Block of 16 elements      |  Scale (1 element)
+16 个元素的块             |  缩放因子（1 个）
 [v0 v1 v2 ... v15]        |  s
                           ▼
-True value of v_i = v_i * s
+v_i 的真实值 = v_i * s
 ```
 
-Different formats differ in:
+不同格式的区别在于：
 
-- **Block size** (how many values share one scale)
-- **Scale type** (what format the scale itself uses)
-- **Scale alignment** (where in memory the scale sits relative to the values)
+- **块大小**（多少个数值共享一个缩放因子）
+- **缩放因子类型**（缩放因子本身用什么格式）
+- **缩放因子的排布**（缩放因子在内存里相对数值放在哪）
 
-### MX-FP4 (Open Compute Project Microscaling)
+### MX-FP4（Open Compute Project 微缩放格式）
 
-The OCP-standardized block FP4 format:
+OCP 标准化的块 FP4 格式：
 
-- **Block size**: 32 elements
-- **Scale type**: FP6 (E3M2)
-- **Layout**: 32 elements (16 bytes packed) + 1 scale (1 byte)
-- **Effective bits/element**: 32×4/32 + 6/32 ≈ 4.19 bits
+- **块大小**：32 个元素
+- **缩放因子类型**：FP6（E3M2）（译注：OCP MX 规范中缩放因子为 8 位的 E8M0，原文此处与规范不符。）
+- **排布**：32 个元素（打包成 16 字节）+ 1 个缩放因子（1 字节）
+- **每元素实际位数**：32×4/32 + 6/32 ≈ 4.19 位
 
-Adopted by AMD, Intel, ARM, and others as a multi-vendor standard.
+AMD、Intel、ARM 等厂商都采用了它，作为多厂商通用标准。
 
-### NVFP4 (NVIDIA's variant)
+### NVFP4（NVIDIA 的变体）
 
-NVIDIA's variant tightens both:
+NVIDIA 的变体把两项都收紧了：
 
-- **Block size**: 16 elements (smaller → better dynamic-range tracking per region of the tensor)
-- **Scale type**: FP8 (E4M3) (more scale precision)
-- **Layout**: 16 elements (8 bytes packed) + 1 scale (1 byte)
-- **Effective bits/element**: 16×4/16 + 8/16 ≈ 4.5 bits
+- **块大小**：16 个元素（更小 → 对张量各局部区域的动态范围跟得更紧）
+- **缩放因子类型**：FP8（E4M3）（缩放因子精度更高）
+- **排布**：16 个元素（打包成 8 字节）+ 1 个缩放因子（1 字节）
+- **每元素实际位数**：16×4/16 + 8/16 ≈ 4.5 位
 
-Slightly more storage than MX-FP4 (~4.5 vs ~4.19 bits/element), but better accuracy in practice on ML workloads — the smaller block size means tensors with non-uniform ranges (e.g., per-channel outliers) get tighter scales.
+比 MX-FP4 多占一点存储（每元素约 4.5 位 vs 约 4.19 位），但在 ML 负载上实际精度更好——块更小，意味着范围不均匀的张量（比如有逐通道离群值的）能拿到更贴合的缩放因子。
 
-**Crucially: native on both SM100 and SM120 Tensor Cores.** This is the rare format that genuinely works the same on both halves of Blackwell.
+**关键的是：SM100 和 SM120 的 Tensor Core 都原生支持它。** 这是少有的在 Blackwell 两个半边上都真正一样能用的格式。
 
-### Why two FP4 formats coexist
+### 为什么两种 FP4 格式并存
 
-NVIDIA owns NVFP4 and ships hardware that natively supports it. The OCP MX-FP4 standard exists because the broader industry didn't want to be locked to NVIDIA's spec. Some libraries (DeepGEMM) ship both NVFP4 and MX-FP4 paths; some (CUTLASS) prefer NVFP4 on NVIDIA hardware.
+NVFP4 归 NVIDIA 所有，NVIDIA 出的硬件原生支持它。OCP 的 MX-FP4 标准之所以存在，是因为整个行业不想被绑死在 NVIDIA 的规格上。有些库（DeepGEMM）同时提供 NVFP4 和 MX-FP4 两条路径；有些（CUTLASS）在 NVIDIA 硬件上偏向 NVFP4。
 
-A common bug: a library compiled with the MX-FP4 path but loaded weights stored in NVFP4 format. The scale layout differs, so the kernel reads the FP8 scale as if it were FP6, producing nonsense outputs without erroring.
+一个常见的 bug：库编译时走的是 MX-FP4 路径，加载的权重却是按 NVFP4 格式存的。两者缩放因子的排布不同，kernel 会把 FP8 缩放因子当成 FP6 来读，不报错，但输出全是垃圾。
 
-## When each format is used
+## 各格式用在哪
 
-A typical inference deployment of a modern MoE model uses **multiple formats simultaneously**:
+现代 MoE 模型的典型推理部署会**同时使用多种格式**：
 
-| Use | Common format |
+| 用途 | 常见格式 |
 | --- | --- |
-| Model weights | NVFP4 (~4.5 bit/elem) |
+| 模型权重 | NVFP4（每元素约 4.5 位） |
 | KV cache | FP8 E4M3 |
-| Activations during prefill | BF16 or FP8 |
-| Activations during decode | BF16 |
-| Tensor Core accumulator | FP32 |
+| prefill 阶段的激活 | BF16 或 FP8 |
+| decode 阶段的激活 | BF16 |
+| Tensor Core 累加器 | FP32 |
 | LayerNorm / softmax | FP32 |
-| Attention scores | FP16 or BF16 |
-| Final logits | FP32 |
+| 注意力分数 | FP16 或 BF16 |
+| 最终 logits | FP32 |
 
-The Tensor Cores can multiply low-precision inputs into a high-precision accumulator in a single instruction. So the heavy GEMMs run at NVFP4-input/FP32-accum throughput, while sensitive operations (norm, softmax) stay at FP32.
+Tensor Core 可以在一条指令里把低精度输入乘进高精度累加器。所以大块的 GEMM 以 NVFP4 输入/FP32 累加的吞吐运行，而敏感的操作（归一化、softmax）保持 FP32。
 
-## The conversion problem
+## 转换问题
 
-Real inference involves **continuous conversion** between formats. A typical layer's data flow:
+真实的推理过程中格式之间**转换不断**。一个典型层的数据流：
 
 ```
-Weights (NVFP4 in HBM)
-     │ load + dequantize
+权重（HBM 里的 NVFP4）
+     │ 加载 + 反量化
      ▼
-Operand A (BF16 in registers)
-     │ Tensor Core MMA (BF16 input, FP32 accum)
+操作数 A（寄存器里的 BF16）
+     │ Tensor Core MMA（BF16 输入，FP32 累加）
      ▼
-Result (FP32 in TMEM/registers)
-     │ activation function (FP32)
+结果（TMEM/寄存器里的 FP32）
+     │ 激活函数（FP32）
      ▼
-Activation (BF16 in registers)
-     │ store + quantize
+激活（寄存器里的 BF16）
+     │ 存储 + 量化
      ▼
-Activation (FP8 in HBM, for KV cache)
+激活（HBM 里的 FP8，供 KV cache 用）
 ```
 
-Each conversion is a kernel responsibility. Bugs in conversion paths are common — and architecture-specific. SM100 has dedicated dequantization instructions for NVFP4 → BF16 inside the `tcgen05` family; SM120 must do this in software (more `mma.sync` ops in the dequant path).
+每一次转换都由 kernel 负责。转换路径上的 bug 很常见——而且和架构相关。SM100 在 `tcgen05` 指令族里有专门的 NVFP4 → BF16 反量化指令；SM120 只能用软件做（反量化路径上要多发一些 `mma.sync`）。
 
-## A note on overflow
+## 关于溢出
 
-At FP8 and below, **overflow is a real concern**. A weight that quantizes to a large E4M3 value, multiplied by an activation that quantizes to a large E4M3 value, can overflow the 448 max representable value. Modern inference stacks include:
+到了 FP8 及以下，**溢出是实打实的问题**。一个量化后是较大 E4M3 值的权重，乘上一个量化后也是较大 E4M3 值的激活，就可能超过 448 这个最大可表示值。现代推理栈会用：
 
-- **Per-tensor scaling** (e.g., per-weight-tensor scale factor)
-- **Per-block scaling** (the MX-FP4 / NVFP4 mechanism)
-- **Stochastic rounding** to prevent systematic bias from rounding-to-nearest
+- **逐张量缩放**（例如每个权重张量一个缩放因子）
+- **逐块缩放**（MX-FP4 / NVFP4 的机制）
+- **随机舍入**，避免就近舍入带来的系统性偏差
 
-Most production inference at FP4 does *not* use stochastic rounding; the per-block scale is enough. Training at FP4 needs stochastic rounding to converge.
+生产环境的 FP4 推理大多*不*用随机舍入；逐块缩放就够了。FP4 训练则需要随机舍入才能收敛。
 
-## Reading a quantization config
+## 读懂量化配置
 
-A modern Hugging Face model card might say:
+一张现代 Hugging Face 模型卡可能会写：
 
 ```yaml
 quantization_config:
@@ -148,22 +148,22 @@ quantization_config:
   kv_cache_dtype: fp8_e4m3
 ```
 
-You'd parse this as: weights are NVFP4 (block 16, FP8 scale); KV cache is FP8 E4M3 (per-token, no further blocking). Loading this with a kernel that expects MX-FP4 layout would silently miscompute.
+解读为：权重是 NVFP4（块大小 16，FP8 缩放因子）；KV cache 是 FP8 E4M3（逐 token，不再分块）。如果用一个按 MX-FP4 排布来读的 kernel 加载它，会悄无声息地算错。
 
-## Checkpoint
+## 自测
 
-You should be able to answer:
+你应该能回答：
 
-- What's the difference between BF16 and FP16?
-- What's the difference between FP8 E4M3 and FP8 E5M2?
-- What's MX-FP4 vs NVFP4? Same? Different? Both?
-- Why is per-block scaling needed at FP4 but not FP16?
-- Why does an SM100 kernel that "outputs in FP32" still emit BF16-looking activations a few layers later?
+- BF16 和 FP16 有什么区别？
+- FP8 E4M3 和 FP8 E5M2 有什么区别？
+- MX-FP4 和 NVFP4 是什么关系？一样？不一样？都是？
+- 为什么 FP4 需要逐块缩放，而 FP16 不需要？
+- 为什么一个"输出 FP32"的 SM100 kernel，几层之后吐出来的激活看起来又是 BF16？
 
-## See also
+## 另见
 
-- [`tensor-cores`](tensor-cores.md) — what consumes these formats
-- [`blackwell/nvfp4-deep-dive`](../blackwell/nvfp4-deep-dive.md) — NVFP4 in depth
-- [`kernels/deepgemm`](../kernels/deepgemm.md) — DeepGEMM's NVFP4-vs-MX-FP4 paths
+- [`tensor-cores`](tensor-cores.md)——这些格式的消费者
+- [`blackwell/nvfp4-deep-dive`](../blackwell/nvfp4-deep-dive.md)——NVFP4 深入解析
+- [`kernels/deepgemm`](../kernels/deepgemm.md)——DeepGEMM 的 NVFP4 与 MX-FP4 两条路径
 - *Open Compute Project Microscaling Format Specification*
-- NVIDIA *Blackwell Architecture Whitepaper*, "Tensor Cores Gen 5"
+- NVIDIA *Blackwell Architecture Whitepaper*，"Tensor Cores Gen 5"一节

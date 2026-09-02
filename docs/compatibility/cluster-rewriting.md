@@ -1,117 +1,117 @@
-# Cluster rewriting
+# cluster 改写
 
-How to handle kernels that assume cluster size > 1, when running on hardware where clusters are unusable.
+kernel 假定 cluster 大小 > 1，却要跑在 cluster 不可用的硬件上，该怎么办。
 
-## The situation
+## 问题是什么
 
-A thread-block cluster ([`blackwell/thread-block-clusters`](../blackwell/thread-block-clusters.md)) groups multiple CTAs into a unit that can share SMEM via the distributed-shared-memory abstraction. On SM100, clusters of size 2–8 are routine. On SM120, **the only safe cluster size is 1**: no cluster-shared SMEM, no cluster-pair MMA, no cluster-distributed TMA.
+线程块簇（cluster，见 [`blackwell/thread-block-clusters`](../blackwell/thread-block-clusters.md)）把多个 CTA 编成一组，组内可以通过分布式共享内存互相访问 SMEM。在 SM100 上，大小 2–8 的 cluster 是家常便饭。在 SM120 上，**唯一安全的 cluster 大小是 1**：没有 cluster 级共享 SMEM，没有 cluster pair MMA，也没有 cluster 分布式 TMA。
 
-If a kernel was written assuming `cluster_dim > 1`, you must rewrite it. Three approaches.
+如果 kernel 写的时候假定了 `cluster_dim > 1`，就必须改写。有三种思路（译注：下文实际列了四种）。
 
-## Approach 1: collapse to single-CTA
+## 思路 1：塌缩成单 CTA
 
-If the cluster was used for **convenience** (e.g., to gang up SMs for a larger virtual SMEM pool), you can often just set `cluster_dim = 1` and accept smaller tiles per CTA.
+如果 cluster 只是**图方便**（比如把几个 SM 拼在一起凑出更大的虚拟 SMEM 池），往往直接把 `cluster_dim = 1`，接受每个 CTA 的 tile 变小就行。
 
 ```cuda
-// Original SM100
+// 原版 SM100
 __cluster_dims__(2, 1, 1)
 __global__ void kernel(...) {
-    // each CTA handles half a tile,
-    // accesses neighbor's SMEM via distributed shared
+    // 每个 CTA 处理半个 tile，
+    // 通过分布式共享内存访问邻居的 SMEM
     auto neighbor_smem = cg::cluster_group::block_index({1, 0, 0});
     ...
 }
 
-// SM120 rewrite: each CTA does the whole half-tile independently
+// SM120 改写：每个 CTA 独立完成整个半 tile
 __global__ void kernel(...) {
-    // cluster_dim implicit at 1
-    // no cross-CTA SMEM access
+    // cluster_dim 隐含为 1
+    // 没有跨 CTA 的 SMEM 访问
     ...
 }
 ```
 
-The reduction in tile size per CTA may need to be compensated by:
+每个 CTA 的 tile 变小了，可能要用下面的办法补回来：
 
-- Launching more CTAs (the same total work, more concurrent CTAs)
-- Using SM120's higher SM count to absorb the extra CTAs
+- 多启动一些 CTA（总工作量不变，并发 CTA 更多）
+- 借 SM120 更多的 SM 数量来吃掉多出来的 CTA
 
-This works when the cluster was **convenient but not essential**.
+cluster **只是方便、并非必需**时，这招管用。
 
-## Approach 2: split into independent kernels
+## 思路 2：拆成独立的 kernel
 
-If the cluster was used for **cooperative computation** — e.g., a `tcgen05.mma.cta_group::2` that issues a 2×-wide MMA across two CTAs — you can't just collapse. The two CTAs were doing genuinely different work that combined into one output tile.
+如果 cluster 是用来做**协作计算**的——比如一条 `tcgen05.mma.cta_group::2`，跨两个 CTA 发射一条 2 倍宽的 MMA——那就不能简单塌缩。两个 CTA 做的是实打实不同的工作，合起来才是一个输出 tile。
 
-The rewrite: split the work into two independent kernels (or two CTAs of the same kernel), each producing half the output. Combine outputs at a higher level.
+改法：把工作拆成两个独立 kernel（或同一 kernel 的两个 CTA），各自产出一半输出，再在更上层把结果合起来。
 
 ```cuda
-// Original: m256n128 cooperative MMA
+// 原版：m256n128 协作 MMA
 __cluster_dims__(2, 1, 1)
 __global__ void mma_cluster_pair(...) {
     if (cluster_block_id() == 0) {
-        // produce upper half via tcgen05.mma.cta_group::2
+        // 通过 tcgen05.mma.cta_group::2 产出上半部分
     } else {
-        // contribute to upper half from lower-half data
+        // 用下半部分的数据为上半部分做贡献
     }
 }
 
-// SM120 rewrite: two independent m128n128 MMAs
+// SM120 改写：两条独立的 m128n128 MMA
 __global__ void mma_independent(int half_id, ...) {
     if (half_id == 0) {
-        // produce upper m128n128 tile via single-CTA mma
+        // 用单 CTA mma 产出上面的 m128n128 tile
     } else {
-        // produce lower m128n128 tile via single-CTA mma
+        // 用单 CTA mma 产出下面的 m128n128 tile
     }
-    // Caller launches with half_id=0 and half_id=1
+    // 调用方分别以 half_id=0 和 half_id=1 启动
 }
 ```
 
-The output is now in two pieces; downstream consumers must read both. This is invasive but mechanically straightforward.
+输出现在变成两块，下游消费者必须两块都读。改动范围大，但机械、不费脑子。
 
-## Approach 3: emulate cluster-shared via global memory
+## 思路 3：用全局内存模拟 cluster 共享
 
-If the cluster used distributed-shared-memory access patterns extensively (e.g., a stencil computation where each CTA reads from many neighbors), substituting global memory through L2 may be the cleanest answer.
+如果 cluster 大量使用分布式共享内存的访问模式（比如 stencil 计算，每个 CTA 要读很多邻居的数据），最干净的办法可能是改用经 L2 的全局内存。
 
 ```cuda
-// Original SM100: read neighbor's SMEM
+// 原版 SM100：读邻居的 SMEM
 auto neighbor = cg::cluster_group::block_index({1, 0, 0});
 float val = neighbor.shared_buffer[idx];
 
-// SM120 rewrite: each CTA writes its share to global memory,
-// then reads back from neighbor's global region
+// SM120 改写：每个 CTA 把自己那份写到全局内存，
+// 再从邻居的全局内存区域读回来
 __shared__ float local_buf[N];
-// ... compute local_buf ...
+// ... 计算 local_buf ...
 __syncthreads();
-// Write local_buf to global region for this CTA
+// 把 local_buf 写到本 CTA 的全局内存区域
 gmem_buf[my_block_id * N + threadIdx.x] = local_buf[threadIdx.x];
 __threadfence();
-// Read neighbor's region from global memory
+// 从全局内存读邻居的区域
 float val = gmem_buf[neighbor_block_id * N + idx];
 ```
 
-Performance cost: global memory access is much slower than distributed-shared-memory access. But L2 (96 MB on workstation Blackwell) is large enough that the data often stays cached, mitigating the penalty.
+性能代价：全局内存访问比分布式共享内存慢得多。但 L2（工作站 Blackwell 上有 96 MB）够大，数据往往能留在缓存里，损失没那么惨。
 
-## Approach 4: don't rewrite — substitute
+## 思路 4：不改写，直接换
 
-For some kernels (especially in libraries like CUTLASS), the cleanest fix is to use a **different template** that targets SM120 directly. CUTLASS has both SM100 templates (using clusters and tcgen05) and SM120 templates (single-CTA, mma.sync). If your kernel uses CUTLASS, configure it to dispatch to the SM120 template tree. No rewrite needed.
+对某些 kernel（尤其是 CUTLASS 这类库里的），最干净的修法是换一套**直接面向 SM120 的模板**。CUTLASS 既有 SM100 模板（用 cluster 和 tcgen05），也有 SM120 模板（单 CTA、mma.sync）。如果你的 kernel 用的是 CUTLASS，把它配置成分发到 SM120 模板树就行，什么都不用改写。
 
-This is by far the cleanest path when it applies.
+只要用得上，这是最干净的路，没有之一。
 
-## Detection
+## 怎么发现
 
-How do you know a kernel uses clusters? Look for:
+怎么知道一个 kernel 用了 cluster？找这些：
 
 ```cuda
-__cluster_dims__(X, Y, Z)         // CUDA C++ attribute
-.cluster_dim X, Y, Z;              // PTX directive
+__cluster_dims__(X, Y, Z)         // CUDA C++ 属性
+.cluster_dim X, Y, Z;              // PTX 指示
 cooperative_groups::cluster_group  // C++ API
-__cluster_size_in_blocks           // builtin
-distributed_shared_memory_address  // distributed-shared-memory access
-cg::cluster_barrier                // cluster-wide barrier
+__cluster_size_in_blocks           // 内建函数
+distributed_shared_memory_address  // 分布式共享内存访问
+cg::cluster_barrier                // cluster 范围的 barrier
 ```
 
-In a compiled binary, look for `cluster_dim` directives in the cubin's PTX section.
+在已编译的二进制里，去 cubin 的 PTX 段找 `cluster_dim` 指示。
 
-## Pseudocode for a cluster-collapsing translator
+## cluster 塌缩翻译器的伪代码
 
 ```python
 def collapse_cluster_dims(ptx_input, target_arch="sm_120"):
@@ -130,18 +130,18 @@ def collapse_cluster_dims(ptx_input, target_arch="sm_120"):
 
         elif "cluster_block_id" in line:
             if cluster_was_active:
-                # This block expected to know its position in the cluster.
-                # If we're collapsing, the answer is always 0.
+                # 这个块原本想知道自己在 cluster 里的位置。
+                # 既然塌缩了，答案永远是 0。
                 out.append("    mov.b32 %ret, 0;    // collapsed cluster")
             else:
                 out.append(line)
 
         elif "shared::cluster" in line:
-            # Distributed-shared-memory access — must emulate via global
+            # 分布式共享内存访问——必须用全局内存模拟
             out.extend(emit_global_emulation(line))
 
         elif "tcgen05.mma.cta_group::2" in line:
-            # Cooperative MMA — must split (cannot mechanically translate)
+            # 协作 MMA——必须拆开（无法机械翻译）
             out.append(f"// FATAL: cta_group::2 has no SM120 equivalent")
             out.append(f"// Original: {line}")
             raise NotMechanicallyTranslatable(line)
@@ -152,20 +152,20 @@ def collapse_cluster_dims(ptx_input, target_arch="sm_120"):
     return out
 ```
 
-Mechanical translation works for collapses (Approach 1) and global-memory emulation (Approach 3). For cooperative computation (Approach 2), automatic translation is impractical: the kernel must be split at the source level.
+机械翻译对塌缩（思路 1）和全局内存模拟（思路 3）行得通。对协作计算（思路 2），自动翻译不现实：kernel 必须在源码层面拆开。
 
-## When clusters are essential, not convenient
+## cluster 是必需品而非便利品的情况
 
-A few kernels genuinely **require** clusters for correctness, not just performance. Examples:
+少数 kernel 是真的**需要** cluster 才能保证正确性，而不只是为了性能。例如：
 
-- Some FlashAttention v3 variants that span 2 CTAs per attention tile to fit the keys/values
-- Ring-attention implementations across cluster-shared SMEM
-- Persistent kernels that use cluster barriers as a synchronization primitive
+- 某些 FlashAttention v3 变体，每个注意力 tile 横跨 2 个 CTA，才装得下 key/value
+- 基于 cluster 共享 SMEM 的 ring-attention 实现
+- 把 cluster barrier 当同步原语用的持久化 kernel
 
-For these, no automatic rewrite is feasible. The kernel needs a hand-redesigned single-CTA variant.
+这些没有任何自动改写可行。kernel 需要人工重新设计一个单 CTA 版本。
 
-## See also
+## 另见
 
-- [`blackwell/thread-block-clusters`](../blackwell/thread-block-clusters.md) — what clusters are
-- [`translating-tcgen05`](translating-tcgen05.md) — partner pattern for `cta_group::2` MMAs
-- [`fundamentals/cuda-pipeline`](../fundamentals/cuda-pipeline.md) — cooperative groups context
+- [`blackwell/thread-block-clusters`](../blackwell/thread-block-clusters.md) — cluster 是什么
+- [`translating-tcgen05`](translating-tcgen05.md) — `cta_group::2` MMA 对应的配套方案
+- [`fundamentals/cuda-pipeline`](../fundamentals/cuda-pipeline.md) — cooperative groups 的背景

@@ -1,5 +1,5 @@
-site_name: Blackwell GPU Wiki
-site_description: SM100 vs SM120, NVFP4, tcgen05, MoE inference on consumer Blackwell — a standalone educational reference.
+site_name: Blackwell GPU Wiki（中文版）
+site_description: SM100 与 SM120 的差异、NVFP4、tcgen05、消费级 Blackwell 上的 MoE 推理——一份独立的学习参考。
 site_url: https://0xsero.github.io/blackwell-gpu-wiki/
 repo_url: https://github.com/0xSero/blackwell-gpu-wiki
 repo_name: 0xSero/blackwell-gpu-wiki
@@ -7,25 +7,26 @@ edit_uri: edit/main/docs/
 
 theme:
   name: material
+  language: zh
   palette:
     - media: "(prefers-color-scheme)"
       toggle:
         icon: material/brightness-auto
-        name: Switch to light mode
+        name: 切换到浅色模式
     - media: "(prefers-color-scheme: light)"
       scheme: default
       primary: black
       accent: green
       toggle:
         icon: material/brightness-7
-        name: Switch to dark mode
+        name: 切换到深色模式
     - media: "(prefers-color-scheme: dark)"
       scheme: slate
       primary: black
       accent: green
       toggle:
         icon: material/brightness-4
-        name: Switch to system preference
+        name: 跟随系统
   font:
     text: Inter
     code: JetBrains Mono
@@ -52,6 +53,9 @@ markdown_extensions:
   - toc:
       permalink: true
       toc_depth: 3
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
   - pymdownx.details
   - pymdownx.highlight:
       anchor_linenums: true
@@ -74,7 +78,10 @@ markdown_extensions:
   - pymdownx.smartsymbols
 
 plugins:
-  - search
+  - search:
+      lang:
+        - zh
+        - en
 
 # Material's built-in Mermaid integration
 # (the superfences custom_fence above routes mermaid blocks to this)
@@ -90,54 +97,54 @@ extra_css:
   - stylesheets/extra.css
 
 nav:
-  - Home: index.md
-  - Overview:
+  - 首页: index.md
+  - 总览:
     - overview/index.md
-    - Architecture: overview/architecture.md
-    - Getting started: overview/getting-started.md
-    - Glossary: overview/glossary.md
-  - Fundamentals:
+    - 架构一页图: overview/architecture.md
+    - 上手指南: overview/getting-started.md
+    - 术语表: overview/glossary.md
+  - 基础:
     - fundamentals/index.md
-    - GPU execution model: fundamentals/gpu-execution-model.md
-    - Memory hierarchy: fundamentals/memory-hierarchy.md
-    - CUDA pipeline: fundamentals/cuda-pipeline.md
-    - Tensor Cores: fundamentals/tensor-cores.md
-    - Number formats: fundamentals/number-formats.md
+    - GPU 执行模型: fundamentals/gpu-execution-model.md
+    - 内存层次: fundamentals/memory-hierarchy.md
+    - CUDA 编译流水线: fundamentals/cuda-pipeline.md
+    - Tensor Core: fundamentals/tensor-cores.md
+    - 数值格式: fundamentals/number-formats.md
   - Blackwell:
     - blackwell/index.md
-    - SM100 vs SM120: blackwell/sm100-vs-sm120.md
-    - tcgen05 and TMEM: blackwell/tcgen05-and-tmem.md
-    - Thread-block clusters: blackwell/thread-block-clusters.md
-    - NVFP4 deep dive: blackwell/nvfp4-deep-dive.md
-  - Kernels:
+    - SM100 与 SM120: blackwell/sm100-vs-sm120.md
+    - tcgen05 与 TMEM: blackwell/tcgen05-and-tmem.md
+    - 线程块簇: blackwell/thread-block-clusters.md
+    - NVFP4 深入: blackwell/nvfp4-deep-dive.md
+  - 内核库:
     - kernels/index.md
     - CUTLASS: kernels/cutlass.md
     - FlashAttention: kernels/flashattention.md
     - FlashInfer: kernels/flashinfer.md
     - DeepGEMM: kernels/deepgemm.md
-    - Marlin and friends: kernels/marlin-and-friends.md
-    - Triton and TransformerEngine: kernels/triton-and-transformerengine.md
-    - NVSHMEM and DeepEP: kernels/nvshmem-and-deepep.md
-    - Inference engines: kernels/inference-engines.md
-  - Interconnect:
+    - Marlin 及同类: kernels/marlin-and-friends.md
+    - Triton 与 TransformerEngine: kernels/triton-and-transformerengine.md
+    - NVSHMEM 与 DeepEP: kernels/nvshmem-and-deepep.md
+    - 推理引擎: kernels/inference-engines.md
+  - 互连:
     - interconnect/index.md
-    - NVLink vs PCIe: interconnect/nvlink-vs-pcie.md
-    - P2P and atomics: interconnect/p2p-and-atomics.md
-    - MoE parallelism: interconnect/moe-parallelism.md
-  - Case studies:
+    - NVLink 与 PCIe: interconnect/nvlink-vs-pcie.md
+    - P2P 与原子操作: interconnect/p2p-and-atomics.md
+    - MoE 并行: interconnect/moe-parallelism.md
+  - 案例分析:
     - case-studies/index.md
-    - DeepSeek V3 and V4: case-studies/deepseek-v3-v4.md
+    - DeepSeek V3 与 V4: case-studies/deepseek-v3-v4.md
     - Kimi K2: case-studies/kimi-k2.md
     - GLM-5: case-studies/glm-5.md
-    - Generic MoE: case-studies/generic-moe-on-consumer-blackwell.md
-  - Compatibility:
+    - 通用 MoE: case-studies/generic-moe-on-consumer-blackwell.md
+  - 兼容方案:
     - compatibility/index.md
-    - Translating tcgen05: compatibility/translating-tcgen05.md
-    - SMEM budget: compatibility/smem-budget-management.md
-    - Cluster rewriting: compatibility/cluster-rewriting.md
-    - EP-to-TP rewriting: compatibility/ep-to-tp-rewriting.md
-    - Runtime detection: compatibility/runtime-detection.md
-  - Reference:
+    - 改写 tcgen05: compatibility/translating-tcgen05.md
+    - SMEM 预算: compatibility/smem-budget-management.md
+    - 改写 cluster: compatibility/cluster-rewriting.md
+    - EP 改 TP: compatibility/ep-to-tp-rewriting.md
+    - 运行时检测: compatibility/runtime-detection.md
+  - 参考:
     - reference/index.md
-    - Abbreviations: reference/abbreviations.md
-    - Bibliography: reference/bibliography.md
+    - 缩写表: reference/abbreviations.md
+    - 参考文献: reference/bibliography.md

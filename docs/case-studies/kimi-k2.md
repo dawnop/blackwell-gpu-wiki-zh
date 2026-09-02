@@ -1,62 +1,62 @@
-# Kimi-K2 family
+# Kimi-K2 系列
 
-Moonshot AI's MoE family. Released across 2025–2026 (K2.0 → K2.6+). Similar profile to DeepSeek-V3/V4 in that it's MoE with NVFP4 quantization, but with a few distinguishing factors that affect how it runs on workstation Blackwell.
+Moonshot AI 的 MoE 系列。2025–2026 年陆续发布（K2.0 → K2.6+）。和 DeepSeek-V3/V4 一样是 MoE 加 NVFP4 量化，情况类似，但有几处差别会影响它在工作站 Blackwell 上的表现。
 
-## The model
+## 模型本身
 
 | | K2.0 | K2.6 |
 | --- | --- | --- |
-| Total parameters | ~600 B | ~700 B |
-| Active per token | ~32 B | ~40 B |
-| Number of experts | 384 | 384 (with refined routing) |
+| 总参数 | ~600 B | ~700 B |
+| 每 token 激活参数 | ~32 B | ~40 B |
+| 专家数 | 384 | 384（路由有改进） |
 | Top-k | 8 | 6 |
-| Hidden dim | 6144 | 7168 |
-| Attention | GQA (Grouped-Query Attention) | GQA |
-| Native quantization | FP8 → NVFP4 (later release) | NVFP4 |
+| 隐层维度 | 6144 | 7168 |
+| Attention | GQA（Grouped-Query Attention） | GQA |
+| 原生量化格式 | FP8 → NVFP4（后续版本） | NVFP4 |
 
-Kimi uses standard GQA rather than DeepSeek's MLA. The KV cache is larger per token than DeepSeek MLA, but the attention kernels are universally available (FlashAttention-2 supports GQA out-of-the-box).
+Kimi 用的是标准 GQA，而不是 DeepSeek 的 MLA。每 token 的 KV cache 比 DeepSeek MLA 大，但 attention kernel 到处都有（FlashAttention-2 原生支持 GQA）。
 
-## What the reference deployment assumes
+## 参考部署默认了什么
 
-Moonshot's deployment guidance for K2 targets:
+Moonshot 给 K2 的部署指南面向：
 
-- **Hardware**: H200 / B100 / B200, ideally with NVLink
-- **GEMM**: their fork of CUTLASS with custom NVFP4 templates targeting `sm_100a`
-- **Attention**: FlashAttention-2 or FlashInfer (GQA paths)
-- **MoE**: vLLM with FlashInfer-MoE for the all-to-all
-- **Parallelism**: EP for the experts, TP within each expert, PP across model layers
+- **硬件**：H200 / B100 / B200，最好有 NVLink
+- **GEMM**：他们自己的 CUTLASS 分支，带定制的 NVFP4 模板，编译目标 `sm_100a`
+- **Attention**：FlashAttention-2 或 FlashInfer（GQA 路径）
+- **MoE**：vLLM，all-to-all 用 FlashInfer-MoE
+- **并行方式**：专家用 EP，专家内部用 TP，模型层之间用 PP
 
-The dependency surface is **less aggressive than DeepSeek's**: Kimi doesn't ship a custom GEMM library; they use CUTLASS. They use FlashAttention-2 (portable) rather than a custom MLA kernel. The MoE all-to-all is the single significant SM100-only assumption.
+依赖面**比 DeepSeek 轻**：Kimi 没有自带 GEMM 库，用的是 CUTLASS；attention 用的是 FlashAttention-2（可移植），而不是定制 MLA kernel。MoE 的 all-to-all 是唯一一处重要的、只有 SM100 才满足的假设。
 
-## What breaks on workstation Blackwell
+## 在工作站 Blackwell 上哪里会坏
 
-### 1. CUTLASS NVFP4 paths hit the SMEM cliff
+### 1. CUTLASS NVFP4 路径撞上 SMEM 断崖
 
-Moonshot's CUTLASS templates inherit the same SMEM-budget assumptions as upstream CUTLASS. On SM120, the auto-carveout request exceeds 99 KiB and corrupts SMEM banks.
+Moonshot 的 CUTLASS 模板继承了上游 CUTLASS 对 SMEM 预算的假设。在 SM120 上，自动 carveout 申请的量超过 99 KiB，会把 SMEM bank 写坏。
 
-Fix: either patch the CUTLASS templates to set explicit smaller `StageCount`, or use the upstream SM120-targeted templates (with slightly different tile shapes than Moonshot's defaults).
+解决：要么改 CUTLASS 模板，显式把 `StageCount` 设小；要么用上游面向 SM120 的模板（tile 形状和 Moonshot 的默认值略有不同）。
 
-### 2. EP-with-FlashInfer-a2a breaks on PCIe atomics
+### 2. EP + FlashInfer a2a 在 PCIe 原子操作上出问题
 
-Same as DeepSeek. Use NCCL fallback or switch to TP-only.
+和 DeepSeek 一样。用 NCCL 回退，或者改成只用 TP。
 
-### 3. The 384-expert count makes TP-only memory-tight
+### 3. 384 个专家让纯 TP 的显存很紧
 
-With 384 experts each ~1.5 GB at NVFP4, total expert weight memory is ~570 GB. On a 4× 96 GB rig (384 GB total), TP=4 with replicated experts (each GPU holds all 384 experts' TP-slices) needs 570/4 ≈ 143 GB per GPU — **doesn't fit** in 96 GB.
+384 个专家，每个 NVFP4 下约 1.5 GB，专家权重总共约 570 GB。在 4× 96 GB 的机器上（共 384 GB），TP=4 且专家复制（每张 GPU 持有全部 384 个专家的 TP 切片）需要 570/4 ≈ 143 GB 每卡——96 GB **放不下**。
 
-This is the case where pure TP-only doesn't work and you need a hybrid plan: TP=4 + PP=2 (split layers across GPU pairs), or accept EP-with-NCCL despite the bandwidth cost.
+这就是纯 TP 行不通、必须上混合方案的情况：TP=4 + PP=2（把层拆到两组 GPU 上），或者忍着带宽代价用 EP + NCCL。
 
-For K2.6, you typically need either:
+对 K2.6，通常需要下面之一：
 
-- Pruning down to ~256 active experts (REAP-style) → fits TP-only
-- Hybrid TP × PP plan (slower per-token decode, lower memory pressure)
-- Acceptance of EP-with-NCCL (slow but works)
+- 剪枝到约 256 个专家（REAP 那种）→ 纯 TP 放得下
+- TP × PP 混合方案（每 token decode 变慢，但显存压力小）
+- 接受 EP + NCCL（慢，但能跑）
 
-### 4. Routing kernel quirks
+### 4. 路由 kernel 的小问题
 
-K2 uses a custom top-k routing kernel that assumes `tcgen05`-style asynchronous Tensor Core execution for the routing softmax. On SM120, this falls back to a slower path. Not a correctness issue, just a performance hit.
+K2 用了一个定制的 top-k 路由 kernel，路由 softmax 默认按 `tcgen05` 那种异步 Tensor Core 方式执行。在 SM120 上会回退到较慢的路径。不影响正确性，只是性能损失。
 
-## Working configuration
+## 能跑的配置
 
 ```yaml
 weights: NVFP4 (Moonshot's K2.6 release, 256 experts after REAP pruning)
@@ -69,32 +69,32 @@ parallelism:
 gemm_backend: cutlass with explicit StageCount=2 or 3
 ```
 
-Notice: with FlashAttention-2 working out-of-the-box for GQA, Kimi-K2 is in some ways **easier** than DeepSeek-V4 to run on workstation Blackwell, despite being a comparable-scale model.
+注意：因为 FlashAttention-2 对 GQA 开箱即用，Kimi-K2 在工作站 Blackwell 上某些方面反而比 DeepSeek-V4 **更好跑**，尽管两者规模相当。
 
-## Performance expectations
+## 性能预期
 
-On 4× workstation Blackwell:
+4 张工作站 Blackwell 上：
 
-| Variant | Decode tok/s |
+| 变体 | Decode tok/s |
 | --- | ---: |
-| K2.6 with REAP pruning to 256 experts | 30–50 |
-| K2.6 full 384 experts via TP × PP=2 | 15–30 |
-| K2.6 via EP-NCCL | 5–10 |
+| K2.6，REAP 剪枝到 256 个专家 | 30–50 |
+| K2.6，完整 384 个专家，TP × PP=2 | 15–30 |
+| K2.6，EP + NCCL | 5–10 |
 
-A datacenter B100 deployment hits 100–200 tok/s. The gap is similar to DeepSeek-V4: ~5×.
+数据中心 B100 部署能到 100–200 tok/s。差距和 DeepSeek-V4 差不多：约 5 倍。
 
-## What's distinctive about Kimi
+## Kimi 的特别之处
 
-- **No custom GEMM library**: depends on CUTLASS, which has SM120 support. Easier to port.
-- **Standard GQA attention**: works on every kernel library.
-- **High expert count**: stresses memory more than DeepSeek (256 → 384).
-- **Routing kernel uses `tcgen05`-style**: a specific kernel-level dependency, not a model-architecture one.
+- **没有自研 GEMM 库**：依赖 CUTLASS，而 CUTLASS 支持 SM120。移植更容易。
+- **标准 GQA attention**：每个 kernel 库都能跑。
+- **专家数量多**：显存压力比 DeepSeek 大（256 → 384）。
+- **路由 kernel 依赖 `tcgen05` 风格**：这是 kernel 层面的依赖，不是模型架构层面的。
 
-If you can run DeepSeek-V4 on workstation Blackwell, you can definitely run Kimi-K2 — except possibly for the memory pressure from 384 experts.
+如果你能在工作站 Blackwell 上跑 DeepSeek-V4，那 Kimi-K2 肯定也能跑——唯一的例外可能是 384 个专家带来的显存压力。
 
-## See also
+## 另见
 
-- [`deepseek-v3-v4`](deepseek-v3-v4.md) — comparable profile, MLA attention
-- [`generic-moe-on-consumer-blackwell`](generic-moe-on-consumer-blackwell.md) — the synthesis
-- [`compatibility/ep-to-tp-rewriting`](../compatibility/ep-to-tp-rewriting.md) — patterns for the parallelism rewrite
-- Moonshot AI's K2 release blog posts and HuggingFace model cards
+- [`deepseek-v3-v4`](deepseek-v3-v4.md) —— 情况相当，用 MLA attention
+- [`generic-moe-on-consumer-blackwell`](generic-moe-on-consumer-blackwell.md) —— 总结
+- [`compatibility/ep-to-tp-rewriting`](../compatibility/ep-to-tp-rewriting.md) —— 并行方案改写的套路
+- Moonshot AI 的 K2 发布博客和 HuggingFace 模型卡

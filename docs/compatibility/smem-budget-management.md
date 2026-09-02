@@ -1,123 +1,123 @@
-# SMEM budget management
+# SMEM 预算管理
 
-How to fit kernels into SM120's tighter shared-memory budget.
+怎样把 kernel 塞进 SM120 更紧的共享内存（SMEM）预算里。
 
-## The numbers
+## 数字
 
-| Architecture | Total SMEM/SM | Driver-reserved | Available to kernel | Headline difference |
+| 架构 | 每 SM 总 SMEM | 驱动预留 | kernel 可用 | 主要差别 |
 | --- | --- | --- | --- | --- |
-| SM90 (H100) | 228 KiB | ~1 KiB | **227 KiB** | baseline |
-| SM100 (B100/B200) | 228 KiB | ~3 KiB | **225 KiB** | tiny |
-| SM120 (RTX PRO 6000) | 100 KiB | ~1 KiB | **99 KiB** | **−128 KiB** |
+| SM90（H100） | 228 KiB | 约 1 KiB | **227 KiB** | 基线 |
+| SM100（B100/B200） | 228 KiB | 约 3 KiB | **225 KiB** | 微乎其微 |
+| SM120（RTX PRO 6000） | 100 KiB | 约 1 KiB | **99 KiB** | **−128 KiB** |
 
-A kernel that fits SM100 but uses 100–225 KiB of SMEM **cannot** be launched on SM120 without reducing its SMEM footprint.
+一个在 SM100 上能跑、但用了 100–225 KiB SMEM 的 kernel，不缩减 SMEM 占用就**没法**在 SM120 上启动。
 
-## Where the SMEM goes
+## SMEM 都花在哪
 
-In a typical MoE GEMM kernel:
+一个典型的 MoE GEMM kernel 里：
 
 ```
-Total kernel SMEM usage =
-    operand A staging buffer
-  + operand B staging buffer
-  + accumulator scratch (if not in registers / TMEM)
-  + scales buffer (NVFP4: 1 byte per 16 elements)
-  + barriers / mbarriers
-  + per-warp scratch (if any)
-  + epilogue scratch (e.g., for activation fusion)
+kernel 的 SMEM 总用量 =
+    操作数 A 暂存缓冲区
+  + 操作数 B 暂存缓冲区
+  + 累加器暂存空间（如果不在寄存器 / TMEM 里）
+  + 缩放因子缓冲区（NVFP4：每 16 个元素 1 字节）
+  + barrier / mbarrier
+  + 每 warp 的暂存空间（如果有）
+  + epilogue 暂存空间（例如做激活函数融合用）
 ```
 
-For a m128n256k64 NVFP4 GEMM with 4-stage pipelining:
+以一个 4 级流水线的 m128n256k64 NVFP4 GEMM 为例：
 
-| Component | Size on SM100 | Size on SM120 |
+| 组成部分 | SM100 上的大小 | SM120 上的大小 |
 | --- | --- | --- |
-| Operand A: 128 × 64 × 0.5 B × 4 stages | 16 KiB | (same) |
-| Operand B: 64 × 256 × 0.5 B × 4 stages | 32 KiB | (same) |
-| Scales for A and B: roughly 4 KiB | 4 KiB | (same) |
-| Accumulator (FP32): 128 × 256 × 4 B | (in TMEM, 0 KiB) | **128 KiB** |
-| Barriers / mbarriers | 1 KiB | (same) |
-| **Total SMEM** | 53 KiB | **181 KiB → exceeds 99 KiB** |
+| 操作数 A：128 × 64 × 0.5 B × 4 级 | 16 KiB | （相同） |
+| 操作数 B：64 × 256 × 0.5 B × 4 级 | 32 KiB | （相同） |
+| A 和 B 的缩放因子：约 4 KiB | 4 KiB | （相同） |
+| 累加器（FP32）：128 × 256 × 4 B | （在 TMEM 里，0 KiB） | **128 KiB** |
+| barrier / mbarrier | 1 KiB | （相同） |
+| **SMEM 总计** | 53 KiB | **181 KiB → 超出 99 KiB** |
 
-The accumulator is the cliff. On SM100 it lives in TMEM (free SMEM-wise); on SM120 it must live in SMEM or registers.
+累加器就是那道断崖。在 SM100 上它住在 TMEM 里，不占 SMEM；到了 SM120 上，它只能住在 SMEM 或寄存器里。
 
-## Strategies to fit
+## 塞进去的策略
 
-### A. Reduce tile shape
+### A. 缩小 tile 形状
 
-Halve the tile in one dimension:
+把 tile 在某一个维度上减半：
 
-| Shape change | Accumulator drop | Throughput cost |
+| 形状变化 | 累加器缩减 | 吞吐代价 |
 | --- | --- | --- |
-| m128n256 → m128n128 | 128 → 64 KiB | ~half throughput per CTA, but 2× more CTAs cover the work |
-| m128n256 → m64n256 | 128 → 64 KiB | similar |
-| m128n256 → m64n128 | 128 → 32 KiB | quarter per-CTA, but 4× CTAs |
+| m128n256 → m128n128 | 128 → 64 KiB | 每个 CTA 的吞吐约减半，但 CTA 数翻倍来覆盖同样的工作 |
+| m128n256 → m64n256 | 128 → 64 KiB | 类似 |
+| m128n256 → m64n128 | 128 → 32 KiB | 每个 CTA 只剩四分之一，但 CTA 数变成 4 倍 |
 
-A m64n128 tile gives plenty of SMEM headroom and often performs nearly as well as m128n256 thanks to better SM occupancy (more concurrent CTAs).
+m64n128 的 tile 能留出充足的 SMEM 余量，而且因为 SM 占用率更高（同时驻留的 CTA 更多），性能往往和 m128n256 相差无几。
 
-### B. Move accumulator to registers
+### B. 把累加器挪到寄存器
 
-A m64n64 FP32 accumulator is 16 KB → 4096 32-bit registers across 128 threads = 32 registers/thread. Tight but feasible.
+一个 m64n64 的 FP32 累加器是 16 KB → 4096 个 32 位寄存器，分摊到 128 个线程上 = 每线程 32 个寄存器。紧，但可行。
 
 ```cuda
-// Per-thread register accumulator
-float acc[8][4];   // each thread holds 8×4 = 32 FP32 values
+// 每线程的寄存器累加器
+float acc[8][4];   // 每个线程持有 8×4 = 32 个 FP32 值
 ```
 
-For larger tiles, register pressure becomes the cliff: above ~96 registers/thread, occupancy drops sharply.
+tile 再大，寄存器压力就成了新的断崖：每线程超过约 96 个寄存器后，占用率会急剧下降。
 
-### C. Reduce pipeline depth
+### C. 减少流水线级数
 
-A 4-stage pipeline holds 4 copies of operand staging buffers. Reducing to 2 stages halves operand SMEM.
+4 级流水线要保存 4 份操作数暂存缓冲区。减到 2 级，操作数占的 SMEM 就减半。
 
-| Pipeline depth | Operand SMEM | Latency hiding |
+| 流水线级数 | 操作数 SMEM | 延迟隐藏效果 |
 | --- | --- | --- |
-| 4 stages | 48 KiB (in our example) | excellent |
-| 3 stages | 36 KiB | very good |
-| 2 stages | 24 KiB | OK |
-| 1 stage | 12 KiB | none, exposed memory latency |
+| 4 级 | 48 KiB（按我们的例子） | 极好 |
+| 3 级 | 36 KiB | 很好 |
+| 2 级 | 24 KiB | 还行 |
+| 1 级 | 12 KiB | 没有，内存延迟完全暴露 |
 
-3 stages is often a good compromise: most of the latency hiding, 25 % SMEM savings.
+3 级通常是个不错的折中：延迟隐藏效果大部分保留，SMEM 省下 25 %。
 
-### D. Recompute instead of staging
+### D. 重算而不是暂存
 
-For some kernels (e.g., FlashAttention), you can recompute intermediate values rather than staging them. Trades arithmetic for SMEM. On SM120 with proportionally more compute than SMEM, this is often a winning trade.
+对某些 kernel（例如 FlashAttention），中间值可以重新算一遍，而不是暂存起来。这是用算力换 SMEM。SM120 的算力相对 SMEM 的比例更高，这笔买卖往往划算。
 
-### E. Spill to L2 instead of SMEM
+### E. 溢出到 L2 而不是 SMEM
 
-For values reused across iterations of the outer loop, write them to global memory (where they hit L2) instead of staging in SMEM. L2 is large (96 MB on workstation Blackwell, much more on B200) and acts as a slower-but-bigger SMEM. Latency is ~150 cycles vs ~30 for SMEM, so this only works for sufficiently long-reuse-distance values.
+对于外层循环多次迭代之间反复用到的值，可以写到全局内存（会落在 L2 里），而不是暂存在 SMEM。L2 很大（工作站版 Blackwell 是 96 MB，B200 更多），可以当成一块更慢但更大的 SMEM 来用。延迟大约 150 个周期，而 SMEM 只有约 30 个周期，所以只适合复用间隔足够长的值。
 
-## A budget worksheet
+## 预算工作表
 
-For each kernel, compute the budget:
-
-```
-Budget = 99 KiB
-  - 1 KiB driver reserved
-  - 1 KiB barriers/mbarriers
-  = 97 KiB available for data
-```
-
-Then categorize:
+对每个 kernel 算一遍预算：
 
 ```
-Operand A:        [size] × [pipeline_depth]
-Operand B:        [size] × [pipeline_depth]
-Scales:           [scale_size] × [pipeline_depth]
-Accumulator:      [acc_size]   (if not in registers/TMEM)
-Epilogue scratch: [epilogue_size]
+预算 = 99 KiB
+  - 1 KiB 驱动预留
+  - 1 KiB barrier/mbarrier
+  = 97 KiB 可用于数据
+```
+
+然后分门别类：
+
+```
+操作数 A：        [size] × [pipeline_depth]
+操作数 B：        [size] × [pipeline_depth]
+缩放因子：        [scale_size] × [pipeline_depth]
+累加器：          [acc_size]   （如果不在寄存器/TMEM 里）
+epilogue 暂存：   [epilogue_size]
                   ─────────────────────
-Total:            [sum]    must be ≤ 97 KiB
+总计：            [sum]    必须 ≤ 97 KiB
 ```
 
-If total > 97 KiB, apply strategies A–E and recompute.
+如果总计 > 97 KiB，就套用策略 A–E，然后重新算。
 
-## Pseudocode for a SMEM-aware kernel selector
+## 感知 SMEM 的 kernel 选择器伪代码
 
 ```python
 def select_kernel_for_sm120(M, N, K, dtype):
     """
-    Pick a CUTLASS-style kernel template that fits the 99 KiB
-    SMEM budget for the given GEMM shape and dtype.
+    针对给定的 GEMM 形状和数据类型，挑一个能塞进
+    99 KiB SMEM 预算的 CUTLASS 风格 kernel 模板。
     """
     candidates = enumerate_sm120_templates(M, N, K, dtype)
     feasible = []
@@ -127,30 +127,30 @@ def select_kernel_for_sm120(M, N, K, dtype):
             feasible.append((tmpl, smem_use, estimate_throughput(tmpl)))
 
     if not feasible:
-        # Fall back to even smaller tiles
+        # 回退到更小的 tile
         return fallback_small_tile_template(M, N, K, dtype)
 
-    # Pick the one with highest estimated throughput
+    # 挑估计吞吐最高的那个
     return max(feasible, key=lambda x: x[2])
 ```
 
-## A common pattern: "the kernel fits, but barely"
+## 常见情形："能塞下，但就差一点"
 
-Many SM100 kernels translated to SM120 land in the 95–105 KiB range — *just* over budget. In these cases, the typical fix is to drop one pipeline stage (e.g., from 4 to 3), saving ~12 KiB. This is much less invasive than reducing the tile shape.
+很多 SM100 kernel 翻译到 SM120 后，落在 95–105 KiB 这个区间，*刚好*超一点预算。这种情况下，典型的修法是砍掉一级流水线（比如 4 级减到 3 级），省下约 12 KiB。这比缩小 tile 形状温和得多。
 
-If even that doesn't fit, the next move is to halve one tile dimension. If even *that* doesn't fit, the kernel has to be substantially redesigned.
+如果这样还塞不下，下一步是把 tile 的某一个维度减半。如果*这样*还塞不下，kernel 就得大改设计了。
 
-## Validation
+## 验证
 
-After applying these strategies:
+套用完这些策略之后：
 
-1. **Compile** the kernel with `nvcc --gpu-architecture=sm_120 --ptxas-options=-v` and read the SMEM number from ptxas.
-2. **Confirm** it's ≤ 99 KiB. If ptxas reports > 99 KiB, the kernel will fail to launch with an "out of resources" error.
-3. **Profile** to confirm the smaller tiles still achieve acceptable throughput. Often 60–75 % of the SM100 throughput is realistic.
+1. 用 `nvcc --gpu-architecture=sm_120 --ptxas-options=-v` **编译** kernel，从 ptxas 的输出里读 SMEM 数字。
+2. **确认**它 ≤ 99 KiB。如果 ptxas 报的数字 > 99 KiB，kernel 启动时会报"out of resources"错误。
+3. **做性能分析**，确认缩小后的 tile 仍能达到可接受的吞吐。通常做到 SM100 吞吐的 60–75 % 是现实的。
 
-## See also
+## 另见
 
-- [`translating-tcgen05`](translating-tcgen05.md) — the partner pattern; tcgen05 translation often increases SMEM use
-- [`blackwell/tcgen05-and-tmem`](../blackwell/tcgen05-and-tmem.md) — why TMEM matters for the SMEM budget
-- [`fundamentals/memory-hierarchy`](../fundamentals/memory-hierarchy.md) — the full memory picture
-- [`kernels/cutlass`](../kernels/cutlass.md) — how CUTLASS exposes these tradeoffs
+- [`translating-tcgen05`](translating-tcgen05.md) —— 配套的套路；tcgen05 翻译往往会增加 SMEM 用量
+- [`blackwell/tcgen05-and-tmem`](../blackwell/tcgen05-and-tmem.md) —— 为什么 TMEM 对 SMEM 预算很重要
+- [`fundamentals/memory-hierarchy`](../fundamentals/memory-hierarchy.md) —— 完整的内存层次图景
+- [`kernels/cutlass`](../kernels/cutlass.md) —— CUTLASS 如何把这些取舍暴露给用户

@@ -1,127 +1,127 @@
-# EP-to-TP plan rewriting
+# EP 转 TP 的部署方案改写
 
-The single highest-impact compatibility pattern: restructuring an expert-parallel deployment plan into a tensor-parallel one.
+收益最大的一条兼容方案：把专家并行（EP）的部署方案改成张量并行（TP）。
 
-## Why this matters
+## 为什么重要
 
-Expert parallelism, as discussed in [`interconnect/moe-parallelism`](../interconnect/moe-parallelism.md), demands a token all-to-all every layer. On a system without NVLink and without P2P atomics, that all-to-all goes through the host bridge and tanks performance.
+[`interconnect/moe-parallelism`](../interconnect/moe-parallelism.md) 里讲过，专家并行每层都要做一次 token 的 all-to-all。在没有 NVLink、也没有 P2P 原子操作的系统上，这次 all-to-all 得绕道主机桥，性能一落千丈。
 
-Tensor parallelism only requires per-layer all-reduce. NCCL ring all-reduce works tolerably over PCIe and the host bridge, especially with NCCL_P2P_LEVEL=PIX.
+张量并行每层只需要一次 all-reduce。NCCL 的环形 all-reduce 走 PCIe 和主机桥还算过得去，尤其是设了 NCCL_P2P_LEVEL=PIX 之后。
 
-Result: rewriting an EP plan as a TP plan often eliminates 80%+ of communication overhead with no kernel-level work required.
+结果：把 EP 方案改写成 TP 方案，常常能砍掉 80% 以上的通信开销，而且一行 kernel 代码都不用动。
 
-## When the rewrite is feasible
+## 什么时候能改
 
-Three conditions:
+三个条件：
 
-1. **Aggregate VRAM is sufficient.** Sharding all experts on every GPU in TP requires the full expert weight to be N-way split. For an MoE model with E experts of weight `W_e` each, total weight is `E × W_e`. TP needs this to fit across `N` GPUs at `(E × W_e) / N` per GPU.
+1. **总显存够用。** TP 要把每个专家都切成 N 份分到所有 GPU 上。对一个有 E 个专家、每个专家权重为 `W_e` 的 MoE 模型，总权重是 `E × W_e`。TP 要求它能摊到 `N` 张 GPU 上，每张 `(E × W_e) / N`。
 
-2. **The model isn't engineered around EP.** Some models (DeepSeek-V4 with NSA) have routing tightly coupled to a specific expert distribution. Rewriting becomes harder.
+2. **模型不是围绕 EP 设计的。** 有些模型（比如带 NSA 的 DeepSeek-V4）的路由和特定的专家分布绑得很紧，改起来就难。
 
-3. **The inference engine supports the alternative.** vLLM, sglang, and TRT-LLM all support TP-only configurations for MoE models, but the flag names and exact semantics differ.
+3. **推理引擎支持这种配置。** vLLM、sglang、TRT-LLM 都支持 MoE 模型只用 TP 的配置，但参数名和具体语义各不相同。
 
-## The mechanical rewrite
+## 机械改写
 
-Conceptually:
+概念上：
 
-| EP plan | TP plan |
+| EP 方案 | TP 方案 |
 | --- | --- |
-| Each GPU holds a disjoint subset of experts | Each GPU holds a TP-shard of every expert |
-| Per-token routing → all-to-all | Per-layer all-reduce (no token routing) |
-| Per-token bandwidth: high | Per-layer bandwidth: lower |
-| Memory: less per GPU (only some experts) | Memory: more per GPU (all experts, sharded) |
+| 每张 GPU 持有互不重叠的一部分专家 | 每张 GPU 持有每个专家的一个 TP 分片 |
+| 按 token 路由 → all-to-all | 按层 all-reduce（不做 token 路由） |
+| 按 token 计的带宽：高 | 按层计的带宽：较低 |
+| 显存：每张 GPU 占用少（只有部分专家） | 显存：每张 GPU 占用多（所有专家，分片存放） |
 
-In an inference-engine config:
+在推理引擎的配置里：
 
 ```yaml
-# Before (EP)
+# 改前（EP）
 tensor_parallel_size: 1
 expert_parallel_size: 4
 moe_routing: standard
-moe_all_to_all_backend: deepep   # or pplx, or nvshmem-based
+moe_all_to_all_backend: deepep   # 或 pplx，或基于 nvshmem 的后端
 
-# After (TP)
+# 改后（TP）
 tensor_parallel_size: 4
-expert_parallel_size: 1            # or omit; defaults to 1
+expert_parallel_size: 1            # 或者不写；默认为 1
 disable_expert_parallelism: true
 ```
 
-This usually works as a drop-in for models where the expert weights split cleanly along the hidden dimension (MLP up_proj, gate_proj, down_proj). For models with shared experts that cross expert boundaries, additional engine support may be needed.
+对于专家权重能沿隐藏维度干净切开的模型（MLP 的 up_proj、gate_proj、down_proj），这样直接换通常就能用。如果模型的共享专家跨越了专家边界，可能还需要引擎额外支持。
 
-## Memory accounting
+## 显存账
 
-Assume an MoE model with:
+假设一个 MoE 模型：
 
-- L layers
-- E experts per layer
-- Each expert: weight `W_e` (in NVFP4 ≈ 0.5 bytes per parameter)
-- Plus shared (non-expert) weights `W_shared`
+- L 层
+- 每层 E 个专家
+- 每个专家权重 `W_e`（NVFP4 下每参数约 0.5 字节）
+- 外加共享（非专家）权重 `W_shared`
 
-**EP=N:**
-
-```
-Per-GPU weight = (W_shared) + (E/N) × W_e × L
-```
-
-**TP=N:**
+**EP=N：**
 
 ```
-Per-GPU weight = (W_shared / N) + E × (W_e / N) × L
-                = (W_shared + E × W_e × L) / N
-                = total_weight / N
+每 GPU 权重 = (W_shared) + (E/N) × W_e × L
 ```
 
-For most models, **TP=N uses *less* memory per GPU** than EP=N, because shared weights also shard. The memory advantage of EP is illusory once you account for replicated shared weights.
+**TP=N：**
 
-## Bandwidth accounting
+```
+每 GPU 权重 = (W_shared / N) + E × (W_e / N) × L
+           = (W_shared + E × W_e × L) / N
+           = 总权重 / N
+```
 
-Per token, per layer:
+对大多数模型来说，**TP=N 每张 GPU 用的显存反而*更少***，因为共享权重也分片了。把共享权重要在每张卡上复制一份这笔账算进去，EP 的显存优势就是假象。
 
-**EP**: each token's hidden state (H bytes) goes from current GPU → expert's GPU → back. Two all-to-alls per layer. Total bytes per token per layer: ~2 × H × (number of expert hops needed to cover top-k experts).
+## 带宽账
 
-**TP**: each layer does one all-reduce of the activation `(B × T × H)`. For batch B = 1, sequence T = 1 (decode), this is `H` bytes per layer, but **distributed across the ring** in pieces. Effective per-layer comm: `H × 2(N-1)/N` bytes through the slowest link.
+每 token、每层：
 
-For typical numbers (H = 8192, N = 4, top-k = 8):
+**EP**：每个 token 的隐藏状态（H 字节）从当前 GPU → 专家所在 GPU → 再回来。每层两次 all-to-all。每 token 每层总字节数：约 2 × H ×（覆盖 top-k 个专家所需的专家跳数）。
 
-- EP: ~16 × 8 × 8192 = ~1 MB per layer of cross-GPU traffic
-- TP: ~12 KB per layer of cross-GPU traffic
+**TP**：每层对激活 `(B × T × H)` 做一次 all-reduce。批大小 B = 1、序列长度 T = 1（decode）时，每层是 `H` 字节，但**分成小块沿环分摊**。有效的每层通信量：经过最慢链路的字节数为 `H × 2(N-1)/N`。
 
-A **~80×** difference. This is why TP is dramatically faster on consumer Blackwell.
+按典型数字（H = 8192，N = 4，top-k = 8）算：
 
-## Throughput consequences
+- EP：约 16 × 8 × 8192 ≈ 1 MB 每层跨 GPU 流量
+- TP：约 12 KB 每层跨 GPU 流量
 
-A model that achieves 100 tok/s in optimal EP on B200 + NVLink might achieve only 5 tok/s in EP on workstation Blackwell (PCIe + host bridge). Same model in TP on workstation Blackwell often hits 50–70 tok/s — a ~10× recovery.
+差了 **约 80 倍**。这就是 TP 在消费级 Blackwell 上快得多的原因。
 
-## Some EP-to-TP gotchas
+## 对吞吐的影响
 
-- **Routing kernel changes.** EP launches a routing kernel that picks experts per token. TP doesn't need this — every GPU has every expert, so routing is local. Some engines hardcode the routing kernel; verify the engine actually skips it in TP mode.
+一个在 B200 + NVLink 上用最优 EP 能跑到 100 tok/s 的模型，在工作站 Blackwell（PCIe + 主机桥）上用 EP 可能只有 5 tok/s。同一个模型在工作站 Blackwell 上改用 TP，常常能到 50–70 tok/s——找回约 10 倍。
 
-- **Activation memory.** TP sometimes increases peak activation memory (each GPU computes the full hidden activation before sharding the next layer). Watch for OOM.
+## EP 转 TP 的几个坑
 
-- **Numerical precision.** TP all-reduce is associative-ish; EP is exact (no cross-GPU reduction). For some models, TP introduces subtle numerical differences. Test for output equivalence, not just non-NaN.
+- **路由 kernel 的变化。** EP 会启动一个路由 kernel，为每个 token 挑专家。TP 用不着——每张 GPU 都有全部专家，路由是本地的。有些引擎把路由 kernel 写死了，要确认引擎在 TP 模式下真的跳过了它。
 
-- **Microbatching.** EP encourages large per-token batches (to amortize all-to-all). TP doesn't. You may want to revisit microbatch size after the rewrite.
+- **激活显存。** TP 有时会抬高激活的峰值显存（每张 GPU 先算出完整的隐藏激活，再为下一层分片）。小心 OOM。
 
-## A pseudocode plan rewriter
+- **数值精度。** TP 的 all-reduce 只是近似满足结合律；EP 是精确的（没有跨 GPU 归约）。对某些模型，TP 会引入细微的数值差异。要测输出是否等价，不能只看有没有 NaN。
+
+- **微批。** EP 鼓励大的 per-token 批（摊薄 all-to-all 的开销），TP 不需要。改完之后可能要重新调微批大小。
+
+## 一个方案改写器的伪代码
 
 ```python
 def rewrite_ep_to_tp(model_config, num_gpus):
     """
-    Take a model config that uses EP and rewrite it for TP-only deployment.
+    把一份使用 EP 的模型配置改写成纯 TP 部署。
     """
     if model_config.parallelism.ep_size <= 1:
-        return model_config    # already TP-only
+        return model_config    # 已经是纯 TP
 
     new = copy.deepcopy(model_config)
     new.parallelism.tp_size = num_gpus
     new.parallelism.ep_size = 1
     new.parallelism.disable_expert_parallelism = True
 
-    # Some engines have separate flags for the routing path
-    new.engine.moe_routing_kernel = "local"   # not "all_to_all"
+    # 有些引擎的路由路径有单独的开关
+    new.engine.moe_routing_kernel = "local"   # 而不是 "all_to_all"
     new.engine.moe_all_to_all_backend = None
 
-    # Memory budget check
+    # 检查显存预算
     total_weight = compute_total_weight(model_config)
     per_gpu_after_tp = total_weight / num_gpus
     if per_gpu_after_tp > GPU_MEMORY * 0.94:
@@ -130,19 +130,19 @@ def rewrite_ep_to_tp(model_config, num_gpus):
     return new
 ```
 
-## When TP-only doesn't fit
+## 纯 TP 装不下怎么办
 
-If the model is too large for full TP across your GPU count, fall back to:
+如果模型太大，按你的 GPU 数量做完整 TP 也装不下，可以退到：
 
-- **TP × PP hybrid.** Split layers across pairs of GPUs (PP), with TP within each pair.
-- **A pruned variant.** REAP-160-style pruning eliminates roughly 1/3 of experts with minimal quality loss.
-- **Lower precision.** Mixed-precision (some layers W4A16 via Marlin, others NVFP4) can save memory.
+- **TP × PP 混合。** 把层切到成对的 GPU 上（PP），每对内部用 TP。
+- **剪枝版本。** REAP-160 那样的剪枝能去掉约 1/3 的专家，质量损失很小。
+- **更低精度。** 混合精度（部分层用 Marlin 跑 W4A16，其余用 NVFP4）可以省显存。
 
-These are graceful degradations, not failures.
+这些是体面的降级，不算失败。
 
-## See also
+## 另见
 
-- [`interconnect/moe-parallelism`](../interconnect/moe-parallelism.md) — why EP is bandwidth-hungry
-- [`interconnect/p2p-and-atomics`](../interconnect/p2p-and-atomics.md) — why all-to-all is hard on workstation Blackwell
-- [`kernels/inference-engines`](../kernels/inference-engines.md) — engine-specific knobs for the rewrite
-- [`case-studies/glm-5`](../case-studies/glm-5.md) — a working example of EP-to-TP applied
+- [`interconnect/moe-parallelism`](../interconnect/moe-parallelism.md) — 为什么 EP 这么吃带宽
+- [`interconnect/p2p-and-atomics`](../interconnect/p2p-and-atomics.md) — 为什么 all-to-all 在工作站 Blackwell 上这么难
+- [`kernels/inference-engines`](../kernels/inference-engines.md) — 各引擎做这项改写的具体开关
+- [`case-studies/glm-5`](../case-studies/glm-5.md) — 一个实际应用 EP 转 TP 的例子
