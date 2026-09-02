@@ -8,7 +8,9 @@
 - `zh` 分支：中文译文，页面路径与原文一一对应。翻译约定见 `TRANSLATION-GUIDE.md`；
   译文修正了原文的一批事实性错误，清单见 `ERRATA.md`，页面里对应位置有"译注"。
 
-英文原站：<https://blackwell-gpu-wiki.pages.dev/>
+在线阅读（GitHub Pages，随 `zh` 分支自动部署）：<https://dawnop.github.io/blackwell-gpu-wiki-zh/>
+
+英文原站：<https://blackwell-gpu-wiki.pages.dev/>（2026 年 9 月时已打不开）；上游仓库：<https://github.com/0xSero/blackwell-gpu-wiki>
 
 ## 本地阅读
 
