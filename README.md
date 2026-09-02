@@ -12,6 +12,22 @@
 
 英文原站：<https://blackwell-gpu-wiki.pages.dev/>（2026 年 9 月时已打不开）；上游仓库：<https://github.com/0xSero/blackwell-gpu-wiki>
 
+## 已提给上游的修正
+
+译文里修正的错误已按主题提给上游仓库，页面里的"译注"对应下列条目；上游合并后译注会随之删除。
+
+| 上游链接 | 内容 |
+| --- | --- |
+| [issue #1](https://github.com/0xSero/blackwell-gpu-wiki/issues/1) / [PR #3](https://github.com/0xSero/blackwell-gpu-wiki/pull/3) | SM120 支持线程块簇（最多 8），"cluster 只能为 1"及其推论不成立 |
+| [issue #2](https://github.com/0xSero/blackwell-gpu-wiki/issues/2) | Tensor Core 页的性能数字与 NVIDIA 公开规格不符 |
+| [PR #4](https://github.com/0xSero/blackwell-gpu-wiki/pull/4) | `wgmma.async` 只在 `sm_90a`，Blackwell 两个分支都没有 |
+| [PR #5](https://github.com/0xSero/blackwell-gpu-wiki/pull/5) | `tcgen05` 指令拼法、TMEM 组织、CTA pair、tile 上限按 PTX ISA 重写 |
+| [PR #6](https://github.com/0xSero/blackwell-gpu-wiki/pull/6) | MX-FP4 缩放因子是 E8M0；IEEE 754 是 1985 年 |
+| [PR #7](https://github.com/0xSero/blackwell-gpu-wiki/pull/7) | `mma.sync` 条数表、块缩放 FP4 写法、改写页的 PTX 示例 |
+| [PR #8](https://github.com/0xSero/blackwell-gpu-wiki/pull/8) | 主次版本号、`sm_NNf`、PCIe 单位、REAP、Marlin、vLLM 参数、SMEM 超限行为等杂项 |
+
+完整清单见 `ERRATA.md`。
+
 ## 本地阅读
 
 ```bash
