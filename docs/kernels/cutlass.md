@@ -84,9 +84,9 @@ SM120 模板和 SM100 模板是*两棵独立的树*，不是简单地重新编�
 
 修复：用 SM120 模板配上更小的 tile 形状，或者显式设置 `StageCount`。
 
-**故障 3：cluster 降级**
+**故障 3：CTA pair MMA**
 
-一个带 `cta_group::2`（CTA pair MMA）的 CUTLASS 模板在 SM120 上启动。cluster 维度被静默设成 (1,1,1)；kernel 在第一个 `cluster.sync` 处死锁，或者产生错误输出。
+一个带 `cta_group::2`（CTA pair MMA）的 CUTLASS 模板为 SM120 编译。`ptxas` 会在编译期拒绝 `tcgen05.*`；如果是预编译的 `sm_100a` cubin，加载时就报没有可用的 kernel image（译注：原文说 cluster 维度被静默降级、在 `cluster.sync` 处死锁或输出错误；SM120 支持 cluster，失败发生在更早的编译或加载阶段，已改）。
 
 修复：只用带 `cta_group::1` 的 CUTLASS 模板。SM120 模板树强制了这一点；SM100 模板树没有。
 

@@ -1,6 +1,8 @@
 # 线程块簇（thread block cluster）
 
-介于 CTA 和 grid 之间的一级调度单位。Hopper 引入，数据中心版 Blackwell 上扩大了规模，**工作站版 Blackwell 上没有**。它是"能编译、能启动、结果却是错的"这类 kernel 问题中出乎意料常见的一个根源。
+介于 CTA 和 grid 之间的一级调度单位。Hopper 引入，数据中心版 Blackwell 上扩大了规模，工作站版 Blackwell 也有，只是少了建在 cluster 之上的两样 SM100 专属功能：CTA pair MMA 和硬件加速的 multicast TMA。
+
+（译注：原文整页建立在"SM120 没有 cluster"这个前提上。这与 CUDA C++ Programming Guide 的"Feature Support per Compute Capability"表不符：Thread Block Cluster 和 Distributed Shared Memory 两行在 12.x 都是 Yes；NVIDIA 开发者论坛上也有人在 RTX 5090 上用 4 个 block 的 cluster 跑通了 `map_shared_rank`。本页相关说法已据此修正，原文的表述保留在各处译注里。）
 
 ## cluster 是什么
 
@@ -45,16 +47,15 @@ cluster 让两个或更多 CTA 为同一个逻辑 kernel tile **合并各自的 
 | Volta（SM 7.0）– Ampere（SM 8.x） | 1（没有 cluster） |
 | Hopper（SM 9.0） | 最多 8（可移植上限），16（给 kernel 显式打开 `cudaFuncAttributeNonPortableClusterSizeAllowed` 属性后；译注：原文写成"可移植 cluster 大小选项"，属性名和含义已改） |
 | 数据中心版 Blackwell（SM 10.0） | 最多 16 |
-| 工作站版 Blackwell（SM 12.0） | **1（没有 cluster）** |
+| 工作站版 Blackwell（SM 12.0） | 最多 8（可移植上限；没有 16 的非可移植选项）（译注：原文写"1（没有 cluster）"） |
 
-SM120 这一行就是坑所在：一个带 `.cluster_dim 2,1,1`、为 `sm_120` 编译的 kernel 会：
+真正的坑不在 cluster 本身，而在 cluster 之上的 SM100 专属功能。一个带 `.cluster_dim 2,1,1`、为 `sm_120` 编译的 kernel：
 
-1. 编译成功（`ptxas` 接受 `.cluster_dim` 指示符）
-2. 在设备上加载成功
-3. 启动时 cluster 维度**被悄悄降成 (1,1,1)**
-4. 如果 kernel 用到 `cluster.sync` 或 cluster 共享 SMEM 寻址，就会**死锁**或**读到垃圾数据**
+1. 编译成功，启动成功，而且确实以 2 个协作 CTA 运行，`cluster.sync` 和 `shared::cluster` 寻址都正常
+2. 如果它接着发 `tcgen05.mma.cta_group::2`，`ptxas` 早在编译期就会拒绝
+3. 如果它用 multicast TMA，功能上能跑，但没有硬件加速，会明显变慢
 
-这是 [`sm100-vs-sm120`](sm100-vs-sm120.md) 里列出的静默失败类型之一。
+所以 SM120 上和 cluster 有关的失败要么是编译期错误（`cta_group::2`），要么是性能问题（multicast），不是静默算错。（译注：原文说 cluster 维度会被静默降成 (1,1,1)、导致死锁或垃圾数据，与实际不符，已改。）
 
 ## 与 cluster 相关的 PTX
 
@@ -66,7 +67,7 @@ cluster.arrive.aligned %sema;     // 在 cluster mbarrier 上 arrive
 cluster.wait.aligned %sema;       // 在 cluster mbarrier 上 wait
 ```
 
-`cluster.sync` 是 cluster 级屏障。cluster 里所有 CTA 都必须到达；全部到齐后一起继续。在 SM120 上 cluster 大小为 1，`cluster.sync` 就是个空操作（只有一个 CTA，直接往下走），所以靠它做 CTA 间同步的 kernel 会悄无声息地出错。
+`cluster.sync` 是 cluster 级屏障。cluster 里所有 CTA 都必须到达；全部到齐后一起继续。SM120 上它和 Hopper 一样正常工作（译注：原文称 SM120 上是空操作、会悄无声息地出错，已改）。
 
 ### 寻址
 
@@ -75,7 +76,7 @@ ld.shared::cluster.b32 %r0, [%addr];   // 从同一 cluster 里另一个 CTA 的
 st.shared::cluster.b32 [%addr], %r0;   // 写入另一个 CTA 的 SMEM
 ```
 
-这些指令跨越同址 SM 的 SMEM。`shared::cluster` 地址空间比单 CTA 的 SMEM 更宽。在 SM120 上，`shared::cluster` 访问会回退到本地 SMEM（因为没有别的 CTA 可访问）——访问一个本该映射到另一个 CTA SMEM 的"cluster 共享"地址，得到的是垃圾数据。
+这些指令跨越同址 SM 的 SMEM。`shared::cluster` 地址空间比单 CTA 的 SMEM 更宽。SM120 同样支持分布式共享内存，`shared::cluster` 访问正常（译注：原文称会回退到本地 SMEM、读到垃圾数据，已改）。
 
 ### cluster TMA
 
@@ -83,7 +84,7 @@ st.shared::cluster.b32 [%addr], %r0;   // 写入另一个 CTA 的 SMEM
 cp.async.bulk.tensor.shared::cluster.global ...;
 ```
 
-单条指令把张量 tile 从全局内存异步拷贝到 cluster 共享 SMEM，并分片放到各参与 CTA 里。SM100 支持；SM120 不支持（只有 `cp.async.bulk.tensor.shared::cta`）。
+单条指令把张量 tile 从全局内存异步拷贝到 cluster 里多个 CTA 的 SMEM。SM100 有硬件多播。SM120 上 PTX 允许写 `.multicast::cluster`，但 PTX ISA 注明这个限定符只针对 sm_90a / sm_100a 系列做了优化、在其他目标上性能会大幅下降，实际等于没有硬件多播（译注：原文写"SM120 不支持"，已改）。
 
 ## 检测 kernel 是否用了 cluster
 
@@ -96,11 +97,11 @@ cuobjdump --dump-elf-symbols mylib.so | grep -i cluster
 cuobjdump --dump-ptx mylib.so | grep -E 'cluster_dim|cluster\.sync|shared::cluster'
 ```
 
-如果看到 `cluster_dim 2,1,1` 或更大的值，或者任何 `cluster.sync` 指令，说明这个 kernel 依赖 cluster 协作。在 SM120 上跑多半会以不易察觉的方式出错。
+如果看到 `cluster_dim 2,1,1` 或更大的值，或者任何 `cluster.sync` 指令，说明这个 kernel 依赖 cluster 协作。在 SM120 上，只有其中的 `tcgen05.mma.cta_group::2` 会真正失败（编译期），multicast 只是变慢（译注：原文说"多半会以不易察觉的方式出错"，已改）。
 
 ## kernel 其实不需要它声明的 cluster 的情况
 
-有些 kernel 声明 `cluster_dim 2,1,1` 只是为了性能（利用 cluster 共享 TMA 的带宽），逻辑上并不需要 CTA 之间协作。这类 kernel 移植到 SM120 是可行的：把 kernel 改成 cluster 大小为 1，用直接的 SMEM 暂存代替 cluster 共享 TMA。会变慢，但结果正确。
+有些 kernel 声明 `cluster_dim 2,1,1` 只是为了性能（利用 cluster 共享 TMA 的带宽），逻辑上并不需要 CTA 之间协作。这类 kernel 移植到 SM120 是可行的：把 multicast TMA 换成每个 CTA 各自的 TMA（cluster 本身可以留着）。会变慢，但结果正确。
 
 CUTLASS 面向 SM100 的模板很多都属于这一类。面向 SM120 的模板存在的意义正是提供不用 cluster 的等价实现。
 
@@ -112,9 +113,7 @@ CUTLASS 面向 SM100 的模板很多都属于这一类。面向 SM120 的模板�
 
 线程块簇随 Hopper 引入，用来把 Tensor Core 工作扩展到单个 SM 的资源之外。它是一个相当新的编程抽象（2022 年之前没有对应的东西）。Hopper 的 API 通过 `cooperative_groups::cluster_group` 暴露它；CUDA C++ 通过 `__cluster_dims__` 支持它。
 
-消费级 Blackwell *去掉* cluster 这件事很不寻常——NVIDIA 通常会保留已经引入的特性。可能的原因是：cluster 协作需要额外的 SM 到 SM 硬件连接（cluster 共享 SMEM 总线），GB202 芯片为了省面积有意省掉了它。
-
-结果就是：按"Hopper 或更新的架构都支持 cluster"这一假设写的代码，在 SM120 上会意外失败，尽管它的计算能力（12.0）比 Hopper（9.0）*更新*。这是少见的例子——更高的 CC 编号并没有严格包含更低 CC 编号的全部特性，打破了一个通常很可靠的假设。
+（译注：原文此处有两段推测——"消费级 Blackwell 去掉了 cluster、GB202 为省面积省掉了 SM 间互连、更高的 CC 编号不包含更低 CC 的全部特性"。前提不成立，已删。SM120 相对 Hopper 真正去掉或没有的是 TMEM / `tcgen05`、硬件 multicast 和 228 KB 一级的 SMEM。"更高 CC 不一定包含全部特性"这一点倒是对的，但例子应该是 `wgmma`：它只在 `sm_90a` 上有，10.x 和 12.x 都没有。）
 
 ## 自测
 

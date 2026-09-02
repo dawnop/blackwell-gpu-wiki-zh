@@ -73,7 +73,7 @@ asm volatile(
 1. 把每条 `tcgen05.mma` 换成一串 `mma.sync` 指令
 2. 把 TMEM 分配换成寄存器或 SMEM 分配
 3. 缩小 tile 形状，塞进 SM120 的 99 KiB SMEM 上限
-4. 避开 `cluster_dim > 1`（SM120 没有 CTA pair MMA）
+4. 避开 `cta_group::2`（SM120 没有 CTA pair MMA；cluster 本身可以留）
 
 这**不是重新编译一下就完事**，而是要大幅重写 kernel 内层循环。所以移植才这么费时间。
 

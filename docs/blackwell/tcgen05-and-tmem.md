@@ -118,7 +118,7 @@ M=256 的 `tcgen05.mma` tile 一个 CTA 装不下：它的 TMEM 只有 128 个 l
 
 这是 SM100 支持大于 1 的线程块簇的原因之一：`tcgen05` 的 CTA pair 模式需要它。
 
-**工作站版 Blackwell 不支持大于 1 的 cluster，因此完全无法使用 `tcgen05` 的 CTA pair MMA。** 为 SM120 编译的 kernel 只能用单 CTA 的 tile 形状——或者更常见的情况是，根本不用 `tcgen05`。
+**工作站版 Blackwell 有 cluster，但没有 `tcgen05`，所以也没有 CTA pair MMA。**（译注：原文写"不支持大于 1 的 cluster"，与 CUDA 编程指南不符，已改。） 为 SM120 编译的 kernel 只能用单 CTA 的 tile 形状——或者更常见的情况是，根本不用 `tcgen05`。
 
 ## 为什么工作站版 Blackwell 没有 `tcgen05`
 

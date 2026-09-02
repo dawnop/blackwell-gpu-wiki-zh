@@ -4,9 +4,9 @@ kernel 假定 cluster 大小 > 1，却要跑在 cluster 不可用的硬件上，
 
 ## 问题是什么
 
-线程块簇（cluster，见 [`blackwell/thread-block-clusters`](../blackwell/thread-block-clusters.md)）把多个 CTA 编成一组，组内可以通过分布式共享内存互相访问 SMEM。在 SM100 上，大小 2–8 的 cluster 是家常便饭。在 SM120 上，**唯一安全的 cluster 大小是 1**：没有 cluster 级共享 SMEM，没有 cluster pair MMA，也没有 cluster 分布式 TMA。
+线程块簇（cluster，见 [`blackwell/thread-block-clusters`](../blackwell/thread-block-clusters.md)）把多个 CTA 编成一组，组内可以通过分布式共享内存互相访问 SMEM。在 SM100 上，大小 2–8 的 cluster 是家常便饭。在 SM120 上，cluster 和分布式共享 SMEM 本身是有的（最多 8），真正没有的是 **CTA pair MMA（`cta_group::2`）和硬件加速的 multicast TMA**（译注：原文称 SM120 唯一安全的 cluster 大小是 1、没有 cluster 级共享 SMEM，与 CUDA 编程指南不符，已改）。
 
-如果 kernel 写的时候假定了 `cluster_dim > 1`，就必须改写。有四种思路（译注：原文写"三种"，下文实际列了四种）。
+如果 kernel 依赖这两项，就必须改写。下面几种思路仍然适用，只是动机从"没有 cluster"变成"没有 pair MMA / multicast"。有四种思路（译注：原文写"三种"，下文实际列了四种）。
 
 ## 思路 1：塌缩成单 CTA
 

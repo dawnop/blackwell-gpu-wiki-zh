@@ -97,7 +97,7 @@ CUDA 提供了 `cooperative_groups` 命名空间，把 warp/block/cluster 层级
 
 执行模型上有两个变化是 SM100/SM120 故事的核心：
 
-1. **线程块簇**（Hopper 引入，数据中心版 Blackwell 扩展）：把多个 CTA 编成一组，共享一个 SM 簇的分布式共享内存。SM100 支持最大 **cluster size 16**；SM120 只支持 **cluster size 1**（也就是没有真正的簇）。按 `cluster(2,1,1)` 写的 kernel 在 SM120 上不会正确工作。
+1. **线程块簇**（Hopper 引入，数据中心版 Blackwell 扩展）：把多个 CTA 编成一组，共享一个 SM 簇的分布式共享内存。SM100 支持最大 **cluster size 16**；SM120 最大 **8**（译注：原文写 SM120 只支持 1、`cluster(2,1,1)` 的 kernel 不能正确工作，与 CUDA 编程指南不符，已改）。SM120 上没有的是建在 cluster 之上的 CTA pair MMA 和硬件 multicast TMA。
 
 2. **一切皆异步**：SM100 的 `tcgen05` 指令族把 Tensor Core 的执行与 warp 的执行解耦。MMA 异步发出，warp 继续往下跑，同步靠 Tensor Memory 或完成屏障来做。这把 SIMT 模型推到了前所未有的程度。SM120 没有 `tcgen05`，只能停留在老式的同步 `mma.sync` 风格。在 SM100 上依赖异步重叠的 kernel，移植过去就失去了这种重叠。
 

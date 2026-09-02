@@ -25,7 +25,7 @@ graph TD
 
     DC --> DC_features["• tcgen05.* 指令族<br/>• Tensor Memory（TMEM）<br/>• cluster 最大 16<br/>• 每 block 228 KiB SMEM<br/>• HBM3e<br/>• NVLink 5"]
 
-    WS --> WS_features["• 只有 mma.sync（含块缩放版）<br/>• 无 TMEM<br/>• cluster 只能为 1<br/>• 每 block 99 KiB SMEM<br/>• GDDR7<br/>• 只有 PCIe Gen5"]
+    WS --> WS_features["• 只有 mma.sync（含块缩放版）<br/>• 无 TMEM<br/>• 有 cluster，无 CTA pair MMA / 硬件 multicast<br/>• 每 block 99 KiB SMEM<br/>• GDDR7<br/>• 只有 PCIe Gen5"]
 
     Both["两者共有"]
     Both --> Both_features["• 第 5 代 Tensor Core<br/>• 原生 NVFP4 / MX-FP4<br/>• 原生 FP6、FP8<br/>• 同一驱动、同一工具包<br/>• PTX 主版本同为 8"]
