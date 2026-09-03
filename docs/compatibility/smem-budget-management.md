@@ -7,7 +7,7 @@
 | 架构 | 每 SM 总 SMEM | 驱动预留 | kernel 可用 | 主要差别 |
 | --- | --- | --- | --- | --- |
 | SM90（H100） | 228 KiB | 约 1 KiB | **227 KiB** | 基线 |
-| SM100（B100/B200） | 228 KiB | 约 3 KiB | **225 KiB** | 微乎其微 |
+| SM100（B200） | 228 KiB | 约 1 KiB | **227 KiB** | 与 H100 相同 |
 | SM120（RTX PRO 6000） | 100 KiB | 约 1 KiB | **99 KiB** | **−128 KiB** |
 
 一个在 SM100 上能跑、但用了 100–225 KiB SMEM 的 kernel，不缩减 SMEM 占用就**没法**在 SM120 上启动。
@@ -18,13 +18,13 @@
 
 ```
 kernel 的 SMEM 总用量 =
-    操作数 A 暂存缓冲区
-  + 操作数 B 暂存缓冲区
-  + 累加器暂存空间（如果不在寄存器 / TMEM 里）
-  + 缩放因子缓冲区（NVFP4：每 16 个元素 1 字节）
-  + barrier / mbarrier
-  + 每 warp 的暂存空间（如果有）
-  + epilogue 暂存空间（例如做激活函数融合用）
+  操作数 A 暂存缓冲区
+ + 操作数 B 暂存缓冲区
+ + 累加器暂存空间（如果不在寄存器 / TMEM 里）
+ + 缩放因子缓冲区（NVFP4：每 16 个元素 1 字节）
+ + barrier / mbarrier
+ + 每 warp 的暂存空间（如果有）
+ + epilogue 暂存空间（例如做激活函数融合用）
 ```
 
 以一个 4 级流水线的 m128n256k64 NVFP4 GEMM 为例：
@@ -60,7 +60,7 @@ m64n128 的 tile 能留出充足的 SMEM 余量，而且因为 SM 占用率更�
 
 ```cuda
 // 每线程的寄存器累加器
-float acc[8][4];   // 每个线程持有 8×4 = 32 个 FP32 值
+float acc[8][4];  // 每个线程持有 8×4 = 32 个 FP32 值
 ```
 
 tile 再大，寄存器压力就成了新的断崖：每线程超过约 96 个寄存器后，占用率会急剧下降。
@@ -84,7 +84,7 @@ tile 再大，寄存器压力就成了新的断崖：每线程超过约 96 个�
 
 ### E. 溢出到 L2 而不是 SMEM
 
-对于外层循环多次迭代之间反复用到的值，可以写到全局内存（会落在 L2 里），而不是暂存在 SMEM。L2 很大（工作站版 Blackwell 是 96 MB，B200 更多），可以当成一块更慢但更大的 SMEM 来用。延迟大约 150 个周期，而 SMEM 只有约 30 个周期，所以只适合复用间隔足够长的值。
+对于外层循环多次迭代之间反复用到的值，可以写到全局内存（会落在 L2 里），而不是暂存在 SMEM。L2 很大（RTX 5080 实测 65 MB，B200 是 126 MB），可以当成一块更慢但更大的 SMEM 来用。延迟大约 150 个周期，而 SMEM 只有约 30 个周期，所以只适合复用间隔足够长的值。
 
 ## 预算工作表
 
@@ -92,21 +92,21 @@ tile 再大，寄存器压力就成了新的断崖：每线程超过约 96 个�
 
 ```
 预算 = 99 KiB
-  - 1 KiB 驱动预留
-  - 1 KiB barrier/mbarrier
-  = 97 KiB 可用于数据
+ - 1 KiB 驱动预留
+ - 1 KiB barrier/mbarrier
+ = 97 KiB 可用于数据
 ```
 
 然后分门别类：
 
 ```
-操作数 A：        [size] × [pipeline_depth]
-操作数 B：        [size] × [pipeline_depth]
-缩放因子：        [scale_size] × [pipeline_depth]
-累加器：          [acc_size]   （如果不在寄存器/TMEM 里）
-epilogue 暂存：   [epilogue_size]
-                  ─────────────────────
-总计：            [sum]    必须 ≤ 97 KiB
+操作数 A：    [size] × [pipeline_depth]
+操作数 B：    [size] × [pipeline_depth]
+缩放因子：    [scale_size] × [pipeline_depth]
+累加器：     [acc_size]  （如果不在寄存器/TMEM 里）
+epilogue 暂存：  [epilogue_size]
+         ─────────────────────
+总计：      [sum]  必须 ≤ 97 KiB
 ```
 
 如果总计 > 97 KiB，就套用策略 A–E，然后重新算。
@@ -115,23 +115,23 @@ epilogue 暂存：   [epilogue_size]
 
 ```python
 def select_kernel_for_sm120(M, N, K, dtype):
-    """
-    针对给定的 GEMM 形状和数据类型，挑一个能塞进
-    99 KiB SMEM 预算的 CUTLASS 风格 kernel 模板。
-    """
-    candidates = enumerate_sm120_templates(M, N, K, dtype)
-    feasible = []
-    for tmpl in candidates:
-        smem_use = compute_smem_use(tmpl)
-        if smem_use <= 97 * 1024:
-            feasible.append((tmpl, smem_use, estimate_throughput(tmpl)))
+  """
+  针对给定的 GEMM 形状和数据类型，挑一个能塞进
+  99 KiB SMEM 预算的 CUTLASS 风格 kernel 模板。
+  """
+  candidates = enumerate_sm120_templates(M, N, K, dtype)
+  feasible = []
+  for tmpl in candidates:
+    smem_use = compute_smem_use(tmpl)
+    if smem_use <= 97 * 1024:
+      feasible.append((tmpl, smem_use, estimate_throughput(tmpl)))
 
-    if not feasible:
-        # 回退到更小的 tile
-        return fallback_small_tile_template(M, N, K, dtype)
+  if not feasible:
+    # 回退到更小的 tile
+    return fallback_small_tile_template(M, N, K, dtype)
 
-    # 挑估计吞吐最高的那个
-    return max(feasible, key=lambda x: x[2])
+  # 挑估计吞吐最高的那个
+  return max(feasible, key=lambda x: x[2])
 ```
 
 ## 常见情形："能塞下，但就差一点"

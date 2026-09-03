@@ -4,17 +4,15 @@
 
 ## `tcgen05` 是什么
 
-`tcgen05` 是 PTX ISA 8.6 引入（随 CUDA 12.8 发布，之后的版本继续扩充）的一族 PTX 指令，只面向数据中心版 Blackwell 的架构专属目标（`sm_100a`，以及同家族的 `sm_103a` 等）（译注：原文写 PTX ISA 8.4/8.5，已改）。`5` 指第 5 代 Tensor Core，`gen05` 表示这是第 5 代专属的。它的设计目标：
+`tcgen05` 是 PTX ISA 8.6 引入（随 CUDA 12.8 发布，之后的版本继续扩充）的一族 PTX 指令，只面向数据中心版 Blackwell 的架构专属目标（`sm_100a`，以及同家族的 `sm_103a` 等）。`5` 指第 5 代 Tensor Core，`gen05` 表示这是第 5 代专属的。它的设计目标：
 
 1. **把 Tensor Core 的执行和 warp 的执行解耦。** warp 发射一条 MMA 后继续往下走；Tensor Core 在旁边并行跑到结束。
-2. **支持比 `wgmma.async` 更大的 MMA tile。** 单 CTA 最大 M=128、N=256；CTA pair 最大 M=256、N=256（译注：原文写 128×128 和 256×128，按 PTX ISA 已改）。
+2. **支持比 `wgmma.async` 更大的 MMA tile。** 单 CTA 最大 M=128、N=256；CTA pair 最大 M=256、N=256。
 3. **减轻寄存器堆的带宽压力。** 累加器放在 TMEM 里，而不是寄存器里。
 
 这几条加起来，在同一个 SM 上，相比基于 `wgmma.async` 的 kernel，FP4/FP6/FP8 峰值吞吐大约能到 **2–3 倍**。
 
 ## 指令一览
-
-（译注：原文这张表里的指令拼法和语义大半与 PTX ISA 不符——没有按字节分配、没有 `tcgen05.wait`、也没有 TMEM→SMEM 的 `cp`。下表按 PTX ISA 重写，省略了部分限定符。）
 
 | 指令 | 作用 |
 | --- | --- |
@@ -33,30 +31,50 @@
 
 `<kind>` 列举支持的 MMA 类型：`f16`（FP16/BF16 输入）、`tf32`、`f8f6f4`（FP8/FP6/FP4 混用）、`i8`、`mxf8f6f4`、`mxf4`、`mxf4nvf4`（MXFP4 和 NVFP4，带块缩放）。
 
+## 操作数、形状和变体
+
+发射 `tcgen05.mma` 之前要知道的几条硬规矩（PTX ISA 的 "Tensor Core 5th Generation Instructions" 一章）：
+
+- **操作数来源**：A 来自 TMEM 或 SMEM（矩阵描述符），B 只能来自 SMEM，D 只能在 TMEM。块缩放因子和稀疏元数据也在 TMEM。A 放在 TMEM 时必须是 K-major。累加器不再占寄存器。
+- **单线程发射**：PTX 明说它是 "single thread semantics"，与集体执行的 `mma.sync` / `wgmma.mma_async` 不同。Hopper 上整个 warpgroup 128 个线程一起发 `wgmma` 的模型作废，负责 MMA 的 warp 用 `elect_one_sync()` 选一个 lane 发就行。
+- **形状**：
+
+| | M | N | K（每条固定 32 字节） |
+| --- | --- | --- | --- |
+| `cta_group::1` | 64 或 128 | 8–256，步长 8 | FP16/BF16 16、TF32 8、8 位 32、4 位 64 |
+| `cta_group::2` | 128 或 256 | 16–256，步长 16 | 同上 |
+| 块缩放 kind（`mxf8f6f4` / `mxf4` / `mxf4nvf4`） | **只有 128**（`cta_group::1` 下没有 M=64） | 同上 | 同上 |
+
+`kind::i8` 在 N>32 后步长 16；稀疏（`.sp`）K 翻倍；`sm_103a`（B300）的 mxf4 系另有 K=96。
+
+- **变体**：`.sp` 结构化稀疏；`.ws` weight-stationary（B 驻留，只有 `cta_group::1`，配 `tcgen05.shift` 用）。
+- **数据通路利用率**：CUTLASS 文档说 `tcgen05` 比 `wgmma` 快 2 到 4 倍；第三方实测 M=64 只用到一半数据通路，M=128 才接近满。所以单 CTA 也尽量用 M=128。
+- **没有 C++ intrinsic**：CUDA 编程指南说 CC 10.x 的这套特性 "only available through inline PTX"。实际的选择是裸 PTX，或者 CUTLASS/CuTe（C++ 或 CuTe DSL）。
+
 ## 一段完整的 `tcgen05` MMA PTX
 
 一个简化的数据中心版 Blackwell GEMM tile：
 
-（译注：原文的示例用的是不存在的指令拼法，下面按 PTX ISA 重写，仍是示意，省略了描述符构造和 mbarrier 初始化。）
+（示意，省略了描述符构造和 mbarrier 初始化。）
 
 ```ptx
-.shared .b32 tmem_slot;          // alloc 会把 TMEM 地址写到这里
-.shared .b64 mma_bar;            // mbarrier
+.shared .b32 tmem_slot;     // alloc 会把 TMEM 地址写到这里
+.shared .b64 mma_bar;      // mbarrier
 .reg .b32 %taddr, %idesc, %r<32>;
 .reg .b64 %adesc, %bdesc;
 .reg .pred %acc;
 
 // 1. 分配 128 列 TMEM：128 lane × 128 列 × 4 B = 64 KB，正好放一个 m128n128 的 FP32 累加器
-//    整个 warp 一起执行；分配完立刻声明不再分配，让别的 CTA 能拿到剩余 TMEM
+//  整个 warp 一起执行；分配完立刻声明不再分配，让别的 CTA 能拿到剩余 TMEM
 tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [tmem_slot], 128;
 tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned;
 tcgen05.fence::before_thread_sync;
-bar.sync 0;                                   // 让其他 warp 看到这个地址
+bar.sync 0;                  // 让其他 warp 看到这个地址
 tcgen05.fence::after_thread_sync;
 ld.shared.b32 %taddr, [tmem_slot];
 
 // 2. （操作数 A、B 已经由 TMA 暂存到 SMEM；%adesc / %bdesc 是它们的矩阵描述符，
-//     %idesc 描述 M/N/K、数据类型和布局）
+//   %idesc 描述 M/N/K、数据类型和布局）
 
 // 3. 单个线程发射 MMA：D(TMEM) = A × B (+ D)。第一次累加时 %acc 为 false，表示不读旧的 D
 tcgen05.mma.cta_group::1.kind::f16 [%taddr], %adesc, %bdesc, %idesc, %acc;
@@ -88,7 +106,7 @@ tcgen05.dealloc.cta_group::1.sync.aligned.b32 %taddr, 128;
 一种新的片上存储。特性：
 
 - **容量**：每个 SM 256 KB，组织成 128 个 lane × 512 列，每格 32 位
-- **分配粒度**：按列分配，一次 32 到 512 列之间的 2 的幂（32 列 = 16 KB）（译注：原文写"128 字节"，已改）
+- **分配粒度**：按列分配，一次 32 到 512 列之间的 2 的幂（32 列 = 16 KB）
 - **分配器**：`tcgen05.alloc` 返回 TMEM 基地址，`tcgen05.dealloc` 释放
 - **寻址**：TMEM 地址与 SMEM 和全局地址**相互独立**——它是一个 32 位逻辑地址，高 16 位是 lane、低 16 位是列
 - **带宽**：足以让 `tcgen05.mma` 以峰值速率运行
@@ -98,27 +116,45 @@ TMEM 的存在只为一个原因：在 FP4/FP6 MMA 的吞吐量级上，对 `wgm
 
 一个好用的心智模型：TMEM 之于 Tensor Core，就像 L1 缓存之于 ALU。
 
-### TMEM 的组织方式
+### 分配的运行时规则
 
-（译注：原文列出的"默认 / 步长 / 复制 / 压缩"四种布局以及"`tcgen05.shift` 做布局变换"在 PTX ISA 里并不存在，本节按 ISA 改写。）
+`tcgen05.alloc` 不是普通的"申请一块内存"，它有几条容易踩的规矩：
+
+- 整个 warp 一起执行（`.sync.aligned`），单位是列，32 到 512 列之间的 2 的幂，拿到的地址写进 SMEM。
+- **资源不够时阻塞，不是失败。** 同一个 SM 上如果已经有 CTA 占了 512 列，第二个 CTA 的 alloc 会一直等；两个都要 512 列就永远等。
+- 同一 CTA 内后一次 alloc 的列数不得大于前一次。
+- 退出前必须显式 `dealloc`；`relinquish_alloc_permit` 之后本 CTA 不得再 alloc。CUTLASS 的做法是一上来 alloc 满需要的列数，紧接着 relinquish，让下一个 CTA 能被调度进来。
+- `cta_group::2` 时两个 CTA 各出一个 warp 协同 alloc / dealloc；dealloc 和 cluster barrier 的顺序错了，PTX 文档的说法是 "non-deterministic hang"。
+- TMEM 不进静态 occupancy 计算（`cudaOccupancy*` 不知道它的存在），一个 SM 上能同时驻留几个 CTA 由 TMEM 在运行时决定。这一条是第三方观察，NVIDIA 没有明文。
+
+一个直观的数字说明 TMEM 为什么存在：m128n256 的 FP32 累加器有 32K 个值，放寄存器要分摊到 128 个线程、每线程 256 个，超过 255 的上限。
+
+### TMEM 的组织方式
 
 TMEM 是一个 128 lane × 512 列的二维阵列。累加器 D 的第 i 行落在第 i 个 lane 上（M=128 时正好占满，M=64 时只占一半），N 就是占用的列数（FP32 累加时每列存一个值）。所以一个 m128n256 的 FP32 累加器占 256 列，也就是半个 TMEM。
 
 `tcgen05.ld` / `tcgen05.st` 按几种固定形状（`32x32b`、`16x64b`、`16x128b`、`16x256b`）搬数据，而且一个 warp 只能访问它在 warpgroup 里对应的那 32 个 lane（warp 0 管 lane 0–31，warp 1 管 lane 32–63，以此类推）。这就是为什么 epilogue 一定要 4 个 warp 一起做。
 
+`tcgen05.ld` / `st` 的形状有 `.16x64b / .16x128b / .16x256b / .32x32b / .16x32bx2`，`.num` 从 x1 到 x128，可带 `.pack::16b` / `.unpack::16b` 在 32 位和 16 位之间打包；`tcgen05.cp` 的形状有 `.4x256b / .32x128b / .64x128b / .128x256b / .128x128b`。
+
+完成语义分**两套**，不能混用：`ld` / `st` 的完成只能用 `tcgen05.wait::ld` / `wait::st` 看；`mma` / `cp` / `shift` 的完成只能通过 `tcgen05.commit` 挂到 mbarrier 上看（cluster scope，arrive count 1，可以 multicast 到 CTA pair 两边）。
+
 `tcgen05.shift.down` 把一段 TMEM 里的数据整体下移 32 个 lane，配合 weight-stationary 形式的 `tcgen05.mma.ws` 使用，一般 GEMM 用不到。
 
 ## CTA pair / `cta_group::2` 模式
 
-M=256 的 `tcgen05.mma` tile 一个 CTA 装不下：它的 TMEM 只有 128 个 lane。`cta_group::2` 模式让两个 CTA 协作（译注：原文说"两个 CTA 通过 cluster 的 SMEM 链路共享 TMEM 分配、步调一致地各发一条"，按 PTX ISA 改写如下）：
+M=256 的 `tcgen05.mma` tile 一个 CTA 装不下：它的 TMEM 只有 128 个 lane。`cta_group::2` 模式让两个 CTA 协作：
 
-- 两个 CTA 作为同一个 **cluster** 的成员启动（cluster 维度为 2）
-- 两个 CTA 的 SMEM 和 TMEM 都参与：A、B 从两个 CTA 的 SMEM 里各取一半，结果 D 的 256 行分别落到两个 CTA 的 TMEM（各 128 个 lane）
-- MMA 只由其中一个 CTA（leader）的一个线程发射一次；`commit` 可以让完成信号同时到达两个 CTA 里的 mbarrier
+- 两个 CTA 作为同一个 **cluster** 的成员启动；cluster 里 `%cluster_ctarank` 只差最低位的两个 CTA（2i 和 2i+1）配成一对，所以 cluster 的 CTA 总数必须是偶数
+- A 按 M 对半，每个 CTA 装自己那 128 行，互不共享；D 也按 M 对半，各落在自己 TMEM 的 128 个 lane 上
+- **B 是被共享的那个**：每个 CTA 只往自己的 SMEM 装 N 的一半，Tensor Core 跨两块 SMEM 读完整的 B。每个 CTA 装载的 B 只有单 CTA 模式的一半，这就是 CTA pair 省带宽的来源
+- MMA 只由其中一个 CTA（leader）的一个线程发射一次；PTX 不规定谁是 leader，CUTLASS 约定偶数 rank
+- TMA 装载完成的信号要用 `cp.async.bulk.tensor` 的 `.cta_group::2` 限定符打到对方 CTA 的 mbarrier；`tcgen05.commit` 也要 multicast 到两边
+- 整个 kernel 里所有 `tcgen05` 指令的 `.cta_group` 必须一致，不能一半 `::1` 一半 `::2`
 
 这是 SM100 支持大于 1 的线程块簇的原因之一：`tcgen05` 的 CTA pair 模式需要它。
 
-**工作站版 Blackwell 有 cluster，但没有 `tcgen05`，所以也没有 CTA pair MMA。**（译注：原文写"不支持大于 1 的 cluster"，与 CUDA 编程指南不符，已改。） 为 SM120 编译的 kernel 只能用单 CTA 的 tile 形状——或者更常见的情况是，根本不用 `tcgen05`。
+**工作站版 Blackwell 有 cluster，但没有 `tcgen05`，所以也没有 CTA pair MMA。** 为 SM120 编译的 kernel 只能用单 CTA 的 tile 形状——或者更常见的情况是，根本不用 `tcgen05`。
 
 ## 为什么工作站版 Blackwell 没有 `tcgen05`
 
@@ -129,7 +165,7 @@ NVIDIA 大概的考虑（从架构反推）：
 - 消费级负载（游戏、内容创作、轻量 ML）从 m128n256k64 这种大 tile 的 GEMM 里得不到多少好处
 - 把数据中心和消费级区分开是有意为之的产品策略
 
-结果就是：工作站版 Blackwell 有着**同样的 Tensor Core 硬件**（第 5 代，原生 FP4/FP6/FP8），但只能通过 `mma.sync`（以及 `sm_120a` 专属的块缩放 `mma.sync`）访问，而它受寄存器限制（译注：原文写"`mma.sync` 和 `wgmma.async`"，SM120 没有 `wgmma`）。所以它每 SM 的 FP4 峰值吞吐和 Hopper 每 SM 的 FP8 吞吐差不多——有用，但没有 SM100 那种 2–3 倍的代际飞跃。
+结果就是：工作站版 Blackwell 有着**同样的 Tensor Core 硬件**（第 5 代，原生 FP4/FP6/FP8），但只能通过 `mma.sync`（以及 `sm_120a` 专属的块缩放 `mma.sync`）访问，而它受寄存器限制。所以它每 SM 的 FP4 峰值吞吐和 Hopper 每 SM 的 FP8 吞吐差不多——有用，但没有 SM100 那种 2–3 倍的代际飞跃。
 
 ## 什么能在哪跑，附例子
 
@@ -139,7 +175,7 @@ NVIDIA 大概的考虑（从架构反推）：
 // ✓ 在 SM 9.0、10.0、12.0 上都能跑——通用
 mma.sync.aligned.m16n8k32.row.col.f32.bf16.bf16.f32 ...;
 
-// ✓ 只能在 SM 9.0（sm_90a）上跑——Blackwell 两个分支都没有 wgmma（译注：原文说 10.0、12.0 也能跑，已改）
+// ✓ 只能在 SM 9.0（sm_90a）上跑——Blackwell 两个分支都没有 wgmma
 wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16 ...;
 
 // ✓ 只能在 SM 10.0（sm_100a）上跑
@@ -165,15 +201,15 @@ CUTLASS 把选择权交给用户：
 ```cpp
 // CUTLASS Blackwell 数据中心版模板——使用 tcgen05
 using GemmKernel = cutlass::gemm::collective::CollectiveBuilder<
-    cutlass::arch::Sm100,                    // ← 架构选择
-    ...,
-    cutlass::gemm::collective::StageCountAutoCarveout<
-        sizeof(typename CollectiveOp::SharedStorage)>,
-    cutlass::gemm::KernelTmaWarpSpecializedCooperative
+  cutlass::arch::Sm100,          // ← 架构选择
+  ...,
+  cutlass::gemm::collective::StageCountAutoCarveout<
+    sizeof(typename CollectiveOp::SharedStorage)>,
+  cutlass::gemm::KernelTmaWarpSpecializedCooperative
 >::CollectiveOp;
 ```
 
-换成 `cutlass::arch::Sm120` 就会选中另一棵并行的模板树，用 `mma.sync`（译注：原文还写了 `wgmma.async`，SM120 没有它），tile 形状也更小，能装进 99 KiB 的 SMEM 上限。
+换成 `cutlass::arch::Sm120` 就会选中另一棵并行的模板树，用 `mma.sync`，tile 形状也更小，能装进 99 KiB 的 SMEM 上限。
 
 相比之下，DeepGEMM 目前只有面向 `Sm100` 的代码路径（截至 2026 年初）；`Sm120` 移植在进行中但尚未合入。在工作站版 Blackwell 上加载 DeepGEMM 的 kernel 会在运行时失败。
 
@@ -191,8 +227,6 @@ FlashInfer 有基于 Triton 和基于 CUTLASS 的两套注意力 kernel；CUTLAS
 | `tcgen05.commit` + mbarrier | 什么都不用做——`mma.sync` 是同步的，返回即完成 |
 | `tcgen05.ld`（TMEM → 寄存器） | 结果本来就在寄存器里 |
 | `tcgen05.dealloc` | 作用域结束 |
-
-（译注：原文这张表沿用了不存在的指令拼法和"约 256 条 m16n8k32"的数字，已按 PTX ISA 改写；SM120 的 FP4 `mma.sync` 形状是 m16n8k64。）
 
 这种翻译是**机械的**，但产出的 PTX **多得多**——最大的单 CTA tile（m128n256k64）要拆成 256 条 `mma.sync`。最终每 SM 实际达到的 Tensor Core 吞吐大约是 SM120 最优吞吐的 40–70%（而 SM120 的最优吞吐本身又只是 SM100 最优吞吐的一部分）。详细套路见 [`compatibility/translating-tcgen05`](../compatibility/translating-tcgen05.md)。
 
@@ -212,5 +246,5 @@ FlashInfer 有基于 Triton 和基于 CUTLASS 的两套注意力 kernel；CUTLAS
 - [`thread-block-clusters`](thread-block-clusters.md) —— cluster 与 CTA pair MMA
 - [`fundamentals/tensor-cores`](../fundamentals/tensor-cores.md) —— `mma.sync` 与 `wgmma.async` 的背景
 - [`compatibility/translating-tcgen05`](../compatibility/translating-tcgen05.md) —— 移植套路
-- *NVIDIA PTX ISA 8.5*，“TensorCore instructions” → “tcgen05 family”
+- *NVIDIA PTX ISA*（9.3），"Tensor Core 5th Generation Instructions"一节（`tcgen05` 自 8.6 起）
 - *NVIDIA Blackwell Architecture Whitepaper*，“Fifth-Generation Tensor Cores”

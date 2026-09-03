@@ -54,8 +54,12 @@ graph TD
 
 ## 关于时间点的说明
 
-这份 wiki 反映的是 2026 年初开源 GPU 推理生态的状态。具体的内核库版本号（CUTLASS 3.x、sglang 0.5.x、FlashInfer 0.6.x）和 PTX ISA 版本（8.5）在正文中需要的地方都已固定写明。凡是写着"截至 2026 年"的内容，都请当作快照而不是永恒真理——这些库每隔几周就会变。
+这份 wiki 反映的是 2026 年初开源 GPU 推理生态的状态。具体的内核库版本号（CUTLASS 3.x、sglang 0.5.x、FlashInfer 0.6.x）和 PTX ISA 版本（原文按 8.5；译文按 2026 年 9 月的 9.3 核对）在正文中需要的地方都已固定写明。凡是写着"截至 2026 年"的内容，都请当作快照而不是永恒真理——这些库每隔几周就会变。
 
 ---
 
-*源码在 [GitHub](https://github.com/0xSero/blackwell-gpu-wiki)。MIT 协议。*
+*源码在 [GitHub](https://github.com/dawnop/blackwell-gpu-wiki-zh)。MIT 协议。*
+
+## 致谢
+
+正文最初翻译自 [0xSero/blackwell-gpu-wiki](https://github.com/0xSero/blackwell-gpu-wiki)（MIT）。此后中英文都在本仓库独立维护，事实性修正与新增内容见仓库里的 `ERRATA.md`。

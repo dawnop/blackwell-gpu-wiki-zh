@@ -34,10 +34,10 @@
 ### `mma.sync`——通用，自 Volta 起
 
 ```ptx
-mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32  %rd0, %rd1, %rd2, %rd3;
-//                ^^^^^^^^^         ^^^^ ^^^^ ^^^^
-//                tile 形状          A     B    C/D
-//                                  类型  类型  类型
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 %rd0, %rd1, %rd2, %rd3;
+//        ^^^^^^^^^     ^^^^ ^^^^ ^^^^
+//        tile 形状     A   B  C/D
+//                 类型 类型 类型
 ```
 
 读作："同步地对一个 m16n8k16 的 tile（16 行、8 列、内积深度 16）做 MMA，A 行主序、B 列主序，A 和 B 是 BF16，累加器是 FP32，输出在寄存器 `%rd0`，操作数在 `%rd1`、`%rd2`、`%rd3`。"
@@ -45,7 +45,7 @@ mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32  %rd0, %rd1, %rd2, %rd3;
 特点：
 
 - **同步**：warp 发射这条指令，**warp 里全部 32 个线程都必须参与**。结果立刻就在寄存器里。
-- **tile 小**：m16n8k16（BF16/FP16）、m16n8k32（FP8/FP4）。更大的逻辑 tile 要拆成多条 `mma.sync` 依次发射。
+- **tile 小**：m16n8k16（BF16/FP16）、m16n8k32（FP8）、m16n8k64（`sm_120a` 的块缩放 FP4）。更大的逻辑 tile 要拆成多条 `mma.sync` 依次发射。
 - **通用**：从 Volta 起每一代 NVIDIA GPU 都支持。**SM100 和 SM120 都能跑。**
 
 从 Volta 到 Ampere，它差不多是所有 Tensor Core 代码的主力，也是每一代架构上的回退路径。实践中看到的大多数 PTX 里都有 `mma.sync`。
@@ -53,7 +53,7 @@ mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32  %rd0, %rd1, %rd2, %rd3;
 ### `wgmma.async`——Hopper 引入
 
 ```ptx
-wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16  %rd0, %rd1, %rd2, %rd3;
+wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16 %rd0, %rd1, %rd2, %rd3;
 ```
 
 特点：
@@ -61,7 +61,7 @@ wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16  %rd0, %rd1, %rd2, %rd3;
 - **异步**：warp 发射指令后继续干别的活；结果稍后才落地。通过 `wgmma.commit_group.sync` 和 `wgmma.wait_group.sync` 同步。
 - **warp 组**：一个 *warp 组*是 4 个 warp（128 线程）。MMA 由整个 warp 组发射，而不是单个 warp。
 - **tile 更大**：从 m64n128k16 到 m64n256k16，而 mma.sync 只有 m16n8k16。同样的逻辑工作量，发射的指令更少。
-- **只有 Hopper**：`wgmma` 是 `sm_90a` 专属指令。数据中心版 Blackwell 用 `tcgen05.mma` 取代了它，工作站版 Blackwell 则只有 `mma.sync`。**Blackwell 两个分支都不能跑 `wgmma`。**（译注：原文称 SM 10.0 和 SM 12.0 也能跑，与 PTX ISA 不符，已改。）
+- **只有 Hopper**：`wgmma` 是 `sm_90a` 专属指令。数据中心版 Blackwell 用 `tcgen05.mma` 取代了它，工作站版 Blackwell 则只有 `mma.sync`。**Blackwell 两个分支都不能跑 `wgmma`。**
 
 `wgmma.async` 开启了"warp 组上一切皆异步"的时代。现代 Hopper kernel（FA-3、CUTLASS 的 Hopper 模板）都重度依赖它。
 
@@ -69,15 +69,15 @@ wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16  %rd0, %rd1, %rd2, %rd3;
 
 ```ptx
 tcgen05.mma.cta_group::1.kind::mxf4nvf4.block_scale.scale_vec::4X
-    [%tmem_d], %a_desc, %b_desc, %idesc, [%tmem_scale_a], [%tmem_scale_b], %acc;
-//          ^^^^^^^^^^^^ ^^^^^^^^^^^^^^
-//          单 CTA        FP4 输入，带块缩放因子
+  [%tmem_d], %a_desc, %b_desc, %idesc, [%tmem_scale_a], [%tmem_scale_b], %acc;
+//     ^^^^^^^^^^^^ ^^^^^^^^^^^^^^
+//     单 CTA    FP4 输入，带块缩放因子
 ```
 
 特点：
 
 - **异步且解耦**：比 `wgmma` 更彻底。A、B 通过 SMEM 矩阵描述符给出（A 也可以放在 TMEM），累加器和块缩放因子都在 **TMEM** 里，寄存器完全不参与。整条指令由**单个线程**发射，几乎不花时间。
-- **tile 更大**：单 CTA 最大 M=128、N=256；CTA pair（用 `cta_group::2`）最大 M=256、N=256（译注：原文写 m128n128k64 / m256n128k64，按 PTX ISA 已改）。
+- **tile 更大**：单 CTA 最大 M=128、N=256；CTA pair（用 `cta_group::2`）最大 M=256、N=256。
 - **CTA pair / 双 CTA cluster 模式**：两个 CTA 各出一半 SMEM 里的操作数、各收一半 TMEM 里的结果，对一个更大的 tile 只发射一条 MMA。需要 cluster 维度为 2。**仅 SM100。**
 - **配套指令**：`tcgen05.alloc` 分配 TMEM，`tcgen05.commit` 把完成挂到 mbarrier 上，`tcgen05.ld` / `tcgen05.st` 在 TMEM 和寄存器之间搬数据，`tcgen05.cp` 从 SMEM 拷进 TMEM。
 - **仅 SM100。** **SM120 上不能用。**
@@ -96,8 +96,6 @@ tcgen05.mma.cta_group::1.kind::mxf4nvf4.block_scale.scale_vec::4X
 | `tcgen05.mma`（CTA pair） | | | | ✓ | |
 | 块缩放 `mma.sync`（`kind::mxf4nvf4` 等） | | | | | ✓ |
 
-（译注：原文表里 `wgmma.async` 在 SM 10.0 和 12.0 两列都打了勾，与 PTX ISA 不符，已改；另补上 SM 12.0 专属的块缩放 `mma.sync` 一行。）
-
 ## CUTLASS 怎么选
 
 CUTLASS 作为高性能 GEMM 的参考库，为每个 MMA 指令族维护了各自独立的模板体系：
@@ -107,17 +105,17 @@ CUTLASS 作为高性能 GEMM 的参考库，为每个 MMA 指令族维护了各�
 - `cutlass/include/cutlass/gemm/collective/sm100_*`——数据中心版 Blackwell，基于 `tcgen05`
 - `cutlass/include/cutlass/gemm/collective/sm120_*`——工作站版 Blackwell，基于 `mma.sync`（含块缩放版）
 
-实例化一个 CUTLASS GEMM 时，你指定目标架构，模板就会选对应的 MMA 指令族。SM100 模板的目标是 **`sm_100a`**，因为它们需要 `tcgen05`。SM120 模板的目标是 **`sm_120a`**（块缩放 `mma.sync` 是 `a` 专属）或 **`sm_120` / `sm_120f`**，走的是更老但依然有效的 `mma.sync` 路径（译注：原文写 `mma.sync` / `wgmma`，SM120 没有 `wgmma`）。
+实例化一个 CUTLASS GEMM 时，你指定目标架构，模板就会选对应的 MMA 指令族。SM100 模板的目标是 **`sm_100a`**，因为它们需要 `tcgen05`。SM120 模板的目标是 **`sm_120a`**（块缩放 `mma.sync` 是 `a` 专属）或 **`sm_120` / `sm_120f`**，走的是更老但依然有效的 `mma.sync` 路径。
 
 这就是为什么用 CUTLASS 针对一个目标编出来的库，在另一个目标上跑不了：二进制里的指令本身就不一样。
 
 ## 性能视角
 
-FP4 精度下，一条 m128n256k64 的 `tcgen05.mma` 含 128×256×64 ≈ 210 万次乘累加，Tensor Core 要花很多个周期才能算完，并不是"每周期一条"。按 B200 公开的 FP4 稠密峰值（9 PFLOPS）、148 个 SM、2.1 GHz 反推，每个 SM 每周期大约 1.4 万次 FP4 乘累加（每个 SM 4 个 Tensor Core，各约 3.6 千次）。（译注：原文写"每个 Tensor Core 每周期发射一条 m128n128k64，即 1,048,576 次乘累加"，数量级差了两百多倍；"B100 144 个 SM、约 5 PFLOPs"也与公开规格不符，已按 B200 的公开数字改写。）
+FP4 精度下，一条 m128n256k64 的 `tcgen05.mma` 含 128×256×64 ≈ 210 万次乘累加，Tensor Core 要花很多个周期才能算完，并不是"每周期一条"。按 HGX B200 公开的 FP4 稠密峰值（9 PFLOPS）、148 个 SM 反推：NVIDIA 没有公布 B200 的频率，用额定算力反推约 1.9 GHz（GB200 里的 GPU 额定 10 PFLOPS，约 2.1 GHz），两种算法都得到每个 SM 每周期约 1.6 万次 FP4 乘累加（每个 SM 4 个 Tensor Core，各约 4 千次）。
 
 在 SM120 上，没有 `tcgen05`，同样的工作要退回去发射一大堆 `mma.sync m16n8k32`。单个 Tensor Core 的算术吞吐是差不多的——Tensor Core 硬件本身相同——但*调度开销*（发射的指令更多、寄存器堆流量更大）拉低了实际能达到的吞吐。
 
-一个粗略的经验法则：SM120 上的 GEMM kernel **每 FLOP 只能达到 SM100 峰值的 40–70 %**。再看硬件本身：按 NVIDIA 公开规格，RTX PRO 6000 Blackwell 的 FP4 峰值约 4 PFLOPS（稀疏）、约 2 PFLOPS（稠密），B200 约 18 / 9 PFLOPS——**绝对差距约 4–5 倍**。而 GB202 的 SM 数（188 个）比 B200（148 个）还多、频率也更高（2.6 GHz 对 2.1 GHz），折算到每个 SM 每周期，差距约 7 倍——这一部分才是 Tensor Core 数据通路和 ISA（有没有 `tcgen05` / TMEM）造成的。（译注：原文写"RTX PRO 6000 约 125 TFLOPs、B100 约 5 PFLOPs、相差 40 倍、一半来自硬件一半来自 ISA"，与公开规格不符，已改。）
+一个粗略的经验法则：SM120 上的 GEMM kernel **每 FLOP 只能达到 SM100 峰值的 40–70 %**。再看硬件本身：按 NVIDIA 公开规格，RTX PRO 6000 Blackwell 的 FP4 峰值约 4 PFLOPS（稀疏）、约 2 PFLOPS（稠密），B200 约 18 / 9 PFLOPS——**绝对差距约 4–5 倍**。而 GB202 的 SM 数（188 个）比 B200（148 个）还多、频率也更高（2.6 GHz 对约 1.9 GHz），折算到每个 SM 每周期，差距约 8 倍——这一部分才是 Tensor Core 数据通路和 ISA（有没有 `tcgen05` / TMEM）造成的。
 
 ## 常见的 tile 形状
 
@@ -126,10 +124,13 @@ PTX ISA 规定了允许的 tile 形状；各个库从中挑选组合来实例化
 | 指令族 | tile 形状 | 场景 |
 | --- | --- | --- |
 | `mma.sync` | m16n8k16 | FP16/BF16 |
-| `mma.sync` | m16n8k32 | FP8/FP4 |
-| `wgmma.async` | m64n{16…256}k{16,32} | Hopper FP16/FP8 |
-| `tcgen05.mma` | m{64,128}n{64,128}k{16,32,64} | 数据中心版 Blackwell，单 CTA |
-| `tcgen05.mma` | m{128,256}n{64,128}k{16,32,64} | 数据中心版 Blackwell，CTA pair |
+| `mma.sync` | m16n8k32 | FP8 |
+| `mma.sync` | m16n8k64（`kind::mxf4nvf4.block_scale`） | FP4，仅 `sm_120a` |
+| `wgmma.async` | m64n{8…256}k{16,32} | Hopper FP16/FP8 |
+| `tcgen05.mma` | m{64,128}n{8…256，步长 8}k{16,32,64} | 数据中心版 Blackwell，单 CTA；块缩放 kind 只有 M=128 |
+| `tcgen05.mma` | m{128,256}n{16…256，步长 16}k{16,32,64} | 数据中心版 Blackwell，CTA pair |
+
+K 固定为 32 字节一条：FP16 16、TF32 8、8 位 32、4 位 64。
 
 tile 形状的选择是一种权衡：tile 越大，越能摊薄指令发射开销；tile 越小，占用率越高。
 

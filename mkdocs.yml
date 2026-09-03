@@ -149,6 +149,7 @@ nav:
     - 通用 MoE: case-studies/generic-moe-on-consumer-blackwell.md
   - 兼容方案:
     - compatibility/index.md
+    - Hopper 迁到 B200: compatibility/hopper-to-sm100.md
     - 改写 tcgen05: compatibility/translating-tcgen05.md
     - SMEM 预算: compatibility/smem-budget-management.md
     - 改写 cluster: compatibility/cluster-rewriting.md

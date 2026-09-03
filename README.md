@@ -1,33 +1,26 @@
-# Blackwell GPU Wiki（中文版）
+# Blackwell GPU Wiki（中英双语）
 
-[0xSero/blackwell-gpu-wiki](https://github.com/0xSero/blackwell-gpu-wiki) 的中文翻译，供本地阅读。
-原文讲的是 NVIDIA Blackwell 一代里 **SM 10.0**（数据中心版）和 **SM 12.0**（工作站/消费级）
-两条 ISA 的分野：SM100 与 SM120 的差异、NVFP4、`tcgen05`/TMEM、MoE 推理、内核库现状和兼容方案。
-
-- `main` 分支：上游英文原文。
-- `zh` 分支：中文译文，页面路径与原文一一对应。翻译约定见 `TRANSLATION-GUIDE.md`；
-  译文修正了原文的一批事实性错误，清单见 `ERRATA.md`，页面里对应位置有"译注"。
+讲 NVIDIA Blackwell 一代里 **SM 10.0**（数据中心版 B200 / GB200）和 **SM 12.0**（工作站/消费级 RTX PRO、RTX 50）
+两条 ISA 的分野：`tcgen05` / TMEM、CTA pair、NVFP4、cluster 与 TMA、SMEM 预算、MoE 推理、内核库现状、
+两个方向的移植（SM100 → SM120，以及 Hopper → B200）。
 
 在线阅读（GitHub Pages，随 `zh` 分支自动部署）：<https://dawnop.github.io/blackwell-gpu-wiki-zh/>
-页面右上角可以中英切换，英文原文挂在 `/en/` 下，切换时停留在同一页。
+页面右上角可以中英切换，英文挂在 `/en/` 下，切换时停留在同一页。
 
-英文原站：<https://blackwell-gpu-wiki.pages.dev/>（2026 年 9 月时已打不开）；上游仓库：<https://github.com/0xSero/blackwell-gpu-wiki>
+中英文都以本仓库为准、同步维护：事实性修正和新增内容两种语言一起改。
+与原始出处相比改了什么，见 `ERRATA.md`。
 
-## 已提给上游的修正
+## 仓库结构
 
-译文里修正的错误已按主题提给上游仓库，页面里的"译注"对应下列条目；上游合并后译注会随之删除。
-
-| 上游链接 | 内容 |
+| 路径 | 内容 |
 | --- | --- |
-| [issue #1](https://github.com/0xSero/blackwell-gpu-wiki/issues/1) / [PR #3](https://github.com/0xSero/blackwell-gpu-wiki/pull/3) | SM120 支持线程块簇（最多 8），"cluster 只能为 1"及其推论不成立 |
-| [issue #2](https://github.com/0xSero/blackwell-gpu-wiki/issues/2) | Tensor Core 页的性能数字与 NVIDIA 公开规格不符 |
-| [PR #4](https://github.com/0xSero/blackwell-gpu-wiki/pull/4) | `wgmma.async` 只在 `sm_90a`，Blackwell 两个分支都没有 |
-| [PR #5](https://github.com/0xSero/blackwell-gpu-wiki/pull/5) | `tcgen05` 指令拼法、TMEM 组织、CTA pair、tile 上限按 PTX ISA 重写 |
-| [PR #6](https://github.com/0xSero/blackwell-gpu-wiki/pull/6) | MX-FP4 缩放因子是 E8M0；IEEE 754 是 1985 年 |
-| [PR #7](https://github.com/0xSero/blackwell-gpu-wiki/pull/7) | `mma.sync` 条数表、块缩放 FP4 写法、改写页的 PTX 示例 |
-| [PR #8](https://github.com/0xSero/blackwell-gpu-wiki/pull/8) | 主次版本号、`sm_NNf`、PCIe 单位、REAP、Marlin、vLLM 参数、SMEM 超限行为等杂项 |
-
-完整清单见 `ERRATA.md`。
+| `docs/` | 中文正文 |
+| `en-src/docs/` | 英文正文 |
+| `mkdocs.yml` / `mkdocs.en.yml` / `en-src/mkdocs.yml` | 两套站点配置 |
+| `build-all.sh` | 一次构建两种语言到 `site/` 和 `site/en/` |
+| `ERRATA.md` | 相对原始出处的修正与新增清单 |
+| `TRANSLATION-GUIDE.md` | 中文文风与术语约定 |
+| `main` 分支 | 原始出处的英文快照，只读，不再更新 |
 
 ## 本地阅读
 
@@ -35,20 +28,23 @@
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-mkdocs serve
+mkdocs serve                       # 只有中文
 ```
 
-然后打开 <http://127.0.0.1:8000/>（只有中文；语言切换器指向的英文页面要走下面的双语构建）。
-
-## 构建双语静态站
+构建双语静态站：
 
 ```bash
-./build-all.sh          # site/ 是中文，site/en/ 是英文原文（从 main 分支导出）
+./build-all.sh
 python3 -m http.server -d site 8000
+# 打开 http://127.0.0.1:8000/blackwell-gpu-wiki-zh/
 ```
-
-然后打开 <http://127.0.0.1:8000/blackwell-gpu-wiki-zh/>。
 
 ## 协议
 
-原文 MIT，译文沿用 MIT。见 [LICENSE](LICENSE)。
+MIT。见 [LICENSE](LICENSE)。
+
+## 致谢
+
+正文最初翻译自 [0xSero/blackwell-gpu-wiki](https://github.com/0xSero/blackwell-gpu-wiki)（MIT）。
+翻译过程中核对出的错误曾以 issue #1、#2 和 PR #3 到 #8 的形式提交给该仓库；此后本仓库独立维护，
+不再跟随上游。原始快照保留在 `main` 分支。

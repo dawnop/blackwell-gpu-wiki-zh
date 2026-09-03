@@ -6,10 +6,10 @@ NVIDIA GPU 怎样执行 kernel。从 kernel 启动一路到单个 lane 的层级
 
 ```
 Kernel 启动
-  └── Grid                     — 一组 CTA（Cooperative Thread Array，协作线程数组）
-        └── CTA / "Block"       — 一组 warp；整体驻留在一个 SM 上
-              └── Warp           — 32 个线程，锁步执行
-                    └── Thread   — 一条逻辑执行 lane
+ └── Grid           — 一组 CTA（Cooperative Thread Array，协作线程数组）
+    └── CTA / "Block"    — 一组 warp；整体驻留在一个 SM 上
+       └── Warp      — 32 个线程，锁步执行
+          └── Thread  — 一条逻辑执行 lane
 ```
 
 **kernel** 是一个可以从主机（CPU）代码调用的函数。启动 kernel 就是指定 grid 形状（多少个 CTA）和 block 形状（每个 CTA 多少线程），然后把这次调用排进一条 CUDA 流。驱动把 kernel 送到设备，设备上的 SM 按资源余量领取 CTA，执行随即展开。
@@ -38,15 +38,15 @@ Kernel 启动
 
 ```mermaid
 graph TD
-    GPU --- SM0[SM 0]
-    GPU --- SM1[SM 1]
-    GPU --- SMN[SM N]
-    SM0 --- W0a[warp]
-    SM0 --- W0b[warp]
-    SM0 --- W0c[...]
-    W0a --- T0[线程 0]
-    W0a --- T1[线程 1]
-    W0a --- T31[线程 31]
+  GPU --- SM0[SM 0]
+  GPU --- SM1[SM 1]
+  GPU --- SMN[SM N]
+  SM0 --- W0a[warp]
+  SM0 --- W0b[warp]
+  SM0 --- W0c[...]
+  W0a --- T0[线程 0]
+  W0a --- T1[线程 1]
+  W0a --- T31[线程 31]
 ```
 
 一个 CTA 在启动时被分配到某个 SM，之后整个生命周期都待在那里。CTA 不能在 SM 之间迁移。
@@ -97,7 +97,7 @@ CUDA 提供了 `cooperative_groups` 命名空间，把 warp/block/cluster 层级
 
 执行模型上有两个变化是 SM100/SM120 故事的核心：
 
-1. **线程块簇**（Hopper 引入，数据中心版 Blackwell 扩展）：把多个 CTA 编成一组，共享一个 SM 簇的分布式共享内存。SM100 支持最大 **cluster size 16**；SM120 最大 **8**（译注：原文写 SM120 只支持 1、`cluster(2,1,1)` 的 kernel 不能正确工作，与 CUDA 编程指南不符，已改）。SM120 上没有的是建在 cluster 之上的 CTA pair MMA 和硬件 multicast TMA。
+1. **线程块簇**（Hopper 引入，数据中心版 Blackwell 扩展）：把多个 CTA 编成一组，共享一个 SM 簇的分布式共享内存。SM100 支持最大 **cluster size 16**；SM120 最大 **8**。SM120 上没有的是建在 cluster 之上的 CTA pair MMA 和硬件 multicast TMA。
 
 2. **一切皆异步**：SM100 的 `tcgen05` 指令族把 Tensor Core 的执行与 warp 的执行解耦。MMA 异步发出，warp 继续往下跑，同步靠 Tensor Memory 或完成屏障来做。这把 SIMT 模型推到了前所未有的程度。SM120 没有 `tcgen05`，只能停留在老式的同步 `mma.sync` 风格。在 SM100 上依赖异步重叠的 kernel，移植过去就失去了这种重叠。
 

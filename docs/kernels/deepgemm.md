@@ -21,7 +21,7 @@ CUTLASS 是通用的，DeepGEMM 是有的放矢的。具体来说：
 
 ## 依赖什么
 
-- CUDA toolkit（SM100 需要 ≥ 12.4）
+- CUDA toolkit（SM100 分支需要 ≥ 12.9）
 - 一个支持 `--gpu-architecture=compute_100` 的 `nvcc`
 - PyTorch（用于 Python 绑定）
 
@@ -35,6 +35,14 @@ CUTLASS 是通用的，DeepGEMM 是有的放矢的。具体来说：
 - 用 cluster 共享的 TMA 搬运操作数
 - 首次使用时 JIT 编译，缓存在 `~/.cache/deepgemm/`
 
+SM100 支持是 2025 年 7 月由 NVIDIA 提的 PR #112 合入的（需要 CUDA 12.9+）。和 Hopper 版比：
+
+- 量化配方不变（激活 1×128、权重 128×128 分块），但缩放因子从 FP32 换成打包的 UE8M0，走 `SM100_MMA_MXF8F6F4_SS / _2x1SM_SS`，也就是硬件块缩放
+- 缩放因子经 `tcgen05.cp`（CUTLASS 里叫 UTCCP）搬进 TMEM
+- 2 个 CTA 一组 multicast 装载
+- **没有 CUDA core promotion**：Blackwell 的 FP8 累加精度够了，见 [`fundamentals/number-formats`](../fundamentals/number-formats.md)
+- 后续加了 BF16、mega MoE 和 FP8×FP4
+
 DeepGEMM 是 SM100 原生库的典型代表之一。读它的源码是学习现代数据中心版 Blackwell kernel 设计的好途径。
 
 ## SM120 的情况
@@ -43,7 +51,7 @@ DeepGEMM 是 SM100 原生库的典型代表之一。读它的源码是学习现�
 
 ```python
 gencode_flags = [
-    "-gencode", "arch=compute_100,code=sm_100a",
+  "-gencode", "arch=compute_100,code=sm_100a",
 ]
 ```
 
@@ -56,15 +64,15 @@ RuntimeError: CUDA error: no kernel image is available for execution on the devi
 **移植正在进行中。** 这项工作并不轻松，因为每个 kernel 都直接使用 `tcgen05`：
 
 ```cuda
-// DeepGEMM kernel 里这类内联 PTX 的示意（译注：原文的指令拼法不存在，已按 PTX ISA 改写）：
+// DeepGEMM kernel 里这类内联 PTX 的示意：
 asm volatile(
-    "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], 128;\n"
-    : : "r"(smem_slot)                       // TMEM 地址会被写到这个 SMEM 位置
+  "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], 128;\n"
+  : : "r"(smem_slot)            // TMEM 地址会被写到这个 SMEM 位置
 );
 asm volatile(
-    "tcgen05.mma.cta_group::1.kind::mxf4nvf4.block_scale.scale_vec::4X "
-    "[%0], %1, %2, %3, [%4], [%5], p;\n"
-    : : "r"(tmem_d), "l"(a_desc), "l"(b_desc), "r"(idesc), "r"(tmem_sfa), "r"(tmem_sfb)
+  "tcgen05.mma.cta_group::1.kind::mxf4nvf4.block_scale.scale_vec::4X "
+  "[%0], %1, %2, %3, [%4], [%5], p;\n"
+  : : "r"(tmem_d), "l"(a_desc), "l"(b_desc), "r"(idesc), "r"(tmem_sfa), "r"(tmem_sfb)
 );
 ```
 
@@ -101,7 +109,7 @@ SGLANG_ENABLE_DEEP_GEMM=0
 
 **故障 1：`no kernel image`**——DeepGEMM 的 cubin 只有 SM100 版本。见上文。
 
-**故障 2：缩放因子布局不匹配**——DeepGEMM 使用的是某种特定形式的 NVFP4 布局（块交错，FP8 E4M3 缩放因子）。如果模型文件是按 MX-FP4 布局（OCP 标准，块大小 32，E8M0 缩放因子）保存的，通过 DeepGEMM 加载会悄无声息地算出垃圾。（译注：原文把 MX-FP4 的缩放因子写成 FP6 E3M2，按 OCP 规范已改为 E8M0。）有些模型两种布局都提供，要选对。
+**故障 2：缩放因子布局不匹配**——DeepGEMM 使用的是某种特定形式的 NVFP4 布局（块交错，FP8 E4M3 缩放因子）。如果模型文件是按 MX-FP4 布局（OCP 标准，块大小 32，E8M0 缩放因子）保存的，通过 DeepGEMM 加载会悄无声息地算出垃圾。有些模型两种布局都提供，要选对。
 
 **故障 3：半途而废的移植尝试污染了 JIT 缓存**
 
@@ -120,10 +128,10 @@ ls ~/.cache/deepgemm/
 
 ```
 deep_gemm/
-├── csrc/                       # C++ kernel 源码
-├── deep_gemm/jit/              # Python JIT 框架（gemm_jit.py 等）
-├── tests/                      # 逐 kernel 的正确性测试
-└── tools/                      # 基准测试
+├── csrc/            # C++ kernel 源码
+├── deep_gemm/jit/       # Python JIT 框架（gemm_jit.py 等）
+├── tests/           # 逐 kernel 的正确性测试
+└── tools/           # 基准测试
 ```
 
 先看 `deep_gemm/jit/gemm_jit.py`，了解架构目标的选择逻辑；再看 `csrc/` 里真正的 kernel。

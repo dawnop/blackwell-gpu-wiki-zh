@@ -18,7 +18,7 @@ GitHub：`NVIDIA/cutlass`。由 NVIDIA 维护。FlashInfer、vLLM（部分路径
 
 ## 依赖什么
 
-- CUDA toolkit（CUTLASS 3.6 要用全部 Blackwell 特性需要 CUDA ≥ 12.4）
+- CUDA toolkit（SM100 需要 CUDA ≥ 12.8，CUTLASS 3.8 起支持）
 - C++17
 - 一个 nvcc 能驱动的 C++ 编译器
 
@@ -26,7 +26,7 @@ CUTLASS 本身在运行时不依赖任何其他东西——它是纯头文件，
 
 ## SM100 的情况
 
-CUTLASS 3.5+ 在 `cutlass/include/cutlass/gemm/collective/sm100_*` 和 `cutlass/include/cutlass/gemm/kernel/sm100_*` 下有专门的数据中心版 Blackwell 模板。这些模板：
+CUTLASS 3.8+ 在 `cutlass/include/cutlass/gemm/collective/sm100_*` 和 `cutlass/include/cutlass/gemm/kernel/sm100_*` 下有专门的数据中心版 Blackwell 模板。这些模板：
 
 - 目标是 `sm_100a`（架构专用加速版）
 - 内层 MMA 循环用 `tcgen05.mma`
@@ -42,7 +42,7 @@ CUTLASS 3.5+ 在 `cutlass/include/cutlass/gemm/collective/sm100_*` 和 `cutlass/
 CUTLASS 3.6+ 在 `sm120_*` 下有一套平行的模板。这些模板：
 
 - 目标是 `sm_120`（或者为了向前兼容用 `sm_120f`）
-- 用 `mma.sync`（含 `sm_120a` 专属的块缩放 `mma.sync`）代替 `tcgen05.mma`（译注：原文写 `mma.sync` 和 `wgmma.async`，SM120 没有 `wgmma`）
+- 用 `mma.sync`（含 `sm_120a` 专属的块缩放 `mma.sync`）代替 `tcgen05.mma`
 - 累加器放在**寄存器**里（tile 要小一些才装得下），或者经 SMEM 暂存（tile 更大，但 SMEM 压力也更大）
 - **只用单 CTA**（没有 `cluster_dim > 1`）
 - 限制流水线级数，以适应 99 KiB 的 SMEM 上限
@@ -58,7 +58,7 @@ SM120 模板和 SM100 模板是*两棵独立的树*，不是简单地重新编�
 2. `StageCountAutoCarveout` 按 `total_smem - other_uses` 算剩余 SMEM，其中 `total_smem` 取自该架构公布的最大值。
 3. SM100 上最大值是 228 KiB。SM120 上最大值是 **99 KiB**。
 4. 如果开发者在 SM100 上（228 KiB 的余量）测试了自己的模板，然后把同一份代码拿到 SM120 上跑，自动划分的计算会以为有 228 KiB 可用，申请的流水线缓冲区就会超出实际的 99 KiB。
-5. 启动是成功的（CUDA 驱动并不精确校验这个申请），但写操作会越过 SMEM 边界写进相邻的 bank。输出被清零或打乱。**没有任何报错。**
+5. `cudaFuncSetAttribute` 申请超过 99 KiB 会返回 `cudaErrorInvalidValue`，直接启动会报 out of resources。错误只在运行时出现，编译期没有任何提示，而且上层库常把它吞掉、换成一句含糊的"kernel 不可用"。
 
 标志性的 issue：`NVIDIA/cutlass#3096`（"SMEM size detection on Blackwell consumer parts"）。正在推进的修复：在运行时查询 SMEM 预算，尊重设备的实际上限。
 
@@ -68,6 +68,18 @@ SM120 模板和 SM100 模板是*两棵独立的树*，不是简单地重新编�
 - 用 `sm120_*` 模板而不是 `sm100_*` 模板
 - 选更小的 tile 形状，别把 SMEM 用得太满
 
+## CUTLASS 的 SM100 内核长什么样
+
+从 Hopper 的 `sm90_*` 模板过来，命名和分工都变了：
+
+- kernel schedule：`KernelTmaWarpSpecialized1SmSm100` / `2SmSm100`；块缩放的 `...{1,2}SmBlockScaledSm100`，再细分 `Nvf4 / Mxf4 / Mxf8f6f4`。`KernelScheduleAuto` 按 cluster 形状自动选 1SM 还是 2SM
+- mainloop：`MainloopSm100TmaUmmaWarpSpecialized`
+- epilogue：`Sm100TmaWarpSpecialized<StagesC, StagesD, FragmentSize, ReuseSmem, DelayTmaStore>`，从 TMEM 读累加器用 `SM100_TMEM_LOAD_16dp256b1x / 32dp32b1x` 这类拷贝原子
+- 参考 warp 分工：warp 0 = MMA（一个 lane 发射）、warp 1 = 调度（CLC）、warp 2 = TMA load、warp 3 = epilogue load、warp 4 起 = epilogue（默认 4 个 warp，各读自己那 1/4 lane）。Hopper 的"2 个 consumer warpgroup 各持一份累加器寄存器"模型作废：MMA 一个线程、TMA 一个线程，照搬会浪费 warp 和寄存器
+- 版本：3.8 首支持 SM100；4.0（2025-06）加 CuTe DSL；4.2 加 SM103；4.5（2026-05）加 MXF8F6F4 混精；截至 2026 年 9 月稳定版 4.7.1
+
+源码入口：`include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp`。
+
 ## 常见故障
 
 **故障 1：`no kernel image is available`**
@@ -76,23 +88,23 @@ SM120 模板和 SM100 模板是*两棵独立的树*，不是简单地重新编�
 
 修复：用 `-gencode arch=compute_120,code=sm_120` *并且*换用面向 SM120 的模板重新编译，而不是只给 SM100 模板换个 gencode 参数。
 
-**故障 2：输出静默损坏（SMEM 断崖）**
+**故障 2：SMEM 超限，启动失败（SMEM 断崖）**
 
-上面已经讲过。kernel 跑了，API 返回成功，输出却是零或者垃圾数据。
+上面已经讲过。症状是 `cudaErrorInvalidValue` 或 launch out of resources，常被上层库包装成"kernel 不可用"。
 
-检测：对于基于 CUTLASS 的 GEMM，手动用 BF16 跑一个小规模的参考计算来对比。如果 tile 形状是按 SM100 的 SMEM 定的，对比就会失败。
+检测：`nvcc --ptxas-options=-v` 看该模板实例的 SMEM 用量是否超过 99 KiB；或者在启动前后检查 `cudaGetLastError`。
 
 修复：用 SM120 模板配上更小的 tile 形状，或者显式设置 `StageCount`。
 
 **故障 3：CTA pair MMA**
 
-一个带 `cta_group::2`（CTA pair MMA）的 CUTLASS 模板为 SM120 编译。`ptxas` 会在编译期拒绝 `tcgen05.*`；如果是预编译的 `sm_100a` cubin，加载时就报没有可用的 kernel image（译注：原文说 cluster 维度被静默降级、在 `cluster.sync` 处死锁或输出错误；SM120 支持 cluster，失败发生在更早的编译或加载阶段，已改）。
+一个带 `cta_group::2`（CTA pair MMA）的 CUTLASS 模板为 SM120 编译。`ptxas` 会在编译期拒绝 `tcgen05.*`；如果是预编译的 `sm_100a` cubin，加载时就报没有可用的 kernel image。
 
 修复：只用带 `cta_group::1` 的 CUTLASS 模板。SM120 模板树强制了这一点；SM100 模板树没有。
 
 **故障 4：NVFP4 缩放因子布局不匹配**
 
-CUTLASS 要求 NVFP4 的缩放因子按特定布局存放（块交错，FP8 E4M3）。如果模型文件是按 MX-FP4 布局保存的（块大小 32，缩放因子是 FP6 E3M2），再加载进 CUTLASS 的 NVFP4 模板，缩放因子就会被错误解读。
+CUTLASS 要求 NVFP4 的缩放因子按特定布局存放（块交错，FP8 E4M3）。如果模型文件是按 MX-FP4 布局保存的（块大小 32，缩放因子是 E8M0），再加载进 CUTLASS 的 NVFP4 模板，缩放因子就会被错误解读。
 
 修复：重新量化模型文件，或者换一个布局匹配的 kernel 库。
 
@@ -121,16 +133,16 @@ cuobjdump --list-elf mylib.so
 ```
 include/cutlass/
 ├── gemm/
-│   ├── collective/
-│   │   ├── sm70_*       # Volta
-│   │   ├── sm80_*       # Ampere
-│   │   ├── sm90_*       # Hopper
-│   │   ├── sm100_*      # 数据中心版 Blackwell
-│   │   └── sm120_*      # 工作站 Blackwell
-│   ├── kernel/          # 顶层 kernel 组装
-│   └── threadblock/     # 旧的（3.x 之前）tile 级代码
-├── arch/                # 架构封装（cutlass::arch::Sm120 等）
-├── conv/                # 卷积（结构类似）
+│  ├── collective/
+│  │  ├── sm70_*    # Volta
+│  │  ├── sm80_*    # Ampere
+│  │  ├── sm90_*    # Hopper
+│  │  ├── sm100_*   # 数据中心版 Blackwell
+│  │  └── sm120_*   # 工作站 Blackwell
+│  ├── kernel/     # 顶层 kernel 组装
+│  └── threadblock/   # 旧的（3.x 之前）tile 级代码
+├── arch/        # 架构封装（cutlass::arch::Sm120 等）
+├── conv/        # 卷积（结构类似）
 └── ...
 ```
 

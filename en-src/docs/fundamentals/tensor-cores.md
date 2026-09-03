@@ -1,0 +1,155 @@
+# Tensor Cores
+
+Specialized execution units inside each SM that perform matrix-multiply-accumulate (MMA) operations on small tiles in a single instruction. The reason GPUs are useful for transformer inference.
+
+## What they do, and why
+
+A normal warp-level instruction operates on 32 32-bit elements in parallel — 32 SIMT lanes, one element each. A Tensor Core instruction operates on a **matrix tile**: a small block of 16×8 or 16×16 elements, computing the entire `D = A · B + C` for that tile in a single op.
+
+Throughput improves substantially. For BF16 inputs and FP32 accumulator on Hopper:
+
+- Plain FP32 FMA: ~30 TFLOPs/GPU
+- BF16 Tensor Core MMA: ~990 TFLOPs/GPU
+
+Roughly 30×. For FP4 on Blackwell datacenter the speedup is even greater (~165× over plain FP32).
+
+The Tensor Core itself is invisible to the programmer beyond a special instruction. There's no separate "Tensor Core memory" (well, there is now — TMEM, but that's an SM100 thing — see below) — operands come from registers (or SMEM, or TMEM), results land in registers (or TMEM).
+
+## The five generations
+
+| Gen | Architecture | Compute capability | Key features |
+| --- | --- | --- | --- |
+| 1 | Volta | 7.0 (V100) | FP16 input, FP32 accum. `mma.sync` introduced. |
+| 2 | Turing | 7.5 (T4, RTX 20) | + INT8, INT4, INT1 |
+| 3 | Ampere | 8.0–8.9 (A100, RTX 30) | + BF16, TF32. `ldmatrix` for fast SMEM loads. |
+| 4 | Hopper | 9.0 (H100/H200) | + FP8 (E4M3, E5M2). `wgmma.async` (warp-group async MMA). TMA. Thread block clusters. |
+| 5 | Blackwell | 10.0 / 12.0 | + FP6, FP4, MX-FP4, NVFP4. `tcgen05` family (SM100 only). TMEM (SM100 only). |
+
+This wiki is mostly about generation 5. The earlier generations are mentioned for context — you'll see references to `mma.sync` and `wgmma.async` in modern kernel code, especially as fallback paths.
+
+## The MMA instruction families
+
+Three relevant families. All are PTX-level constructs; you rarely write them directly in CUDA C++ but you'll see them in compiled PTX and in CUTLASS templates.
+
+### `mma.sync` — universal, since Volta
+
+```ptx
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32  %rd0, %rd1, %rd2, %rd3;
+//                ^^^^^^^^^         ^^^^ ^^^^ ^^^^
+//                tile shape         A     B    C/D
+//                                  type type type
+```
+
+Parses as: "synchronously perform an MMA on a m16n8k16 tile (16 rows, 8 cols, 16 inner-product depth), with row-major A and col-major B, A and B in BF16, accumulator in FP32, output in registers `%rd0`, operands in `%rd1`, `%rd2`, `%rd3`."
+
+Properties:
+
+- **Synchronous**: warp issues the instruction and **all 32 threads in the warp must participate**. Result is in registers immediately.
+- **Small tiles**: m16n8k16 (BF16/FP16), m16n8k32 (FP8), m16n8k64 (block-scaled FP4 on `sm_120a`). Larger logical tiles are issued as multiple `mma.sync` instructions in sequence.
+- **Universal**: works on every NVIDIA GPU from Volta forward. **Works on both SM100 and SM120.**
+
+Roughly the workhorse of all tensor-core code from Volta through Ampere, and the fallback path on every architecture. Most PTX you see in practice contains `mma.sync` instructions.
+
+### `wgmma.async` — Hopper introduction
+
+```ptx
+wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16  %rd0, %rd1, %rd2, %rd3;
+```
+
+Properties:
+
+- **Asynchronous**: warp issues the instruction, continues executing other work; result lands later. Synchronization via `wgmma.commit_group.sync` and `wgmma.wait_group.sync`.
+- **Warp-group**: a *warp group* is 4 warps (128 threads). The MMA is issued by the warp group, not a single warp.
+- **Larger tiles**: m64n128k16 to m64n256k16, vs. mma.sync's m16n8k16. Fewer instructions issued for the same logical work.
+- **Hopper only**: `wgmma` requires `sm_90a`. Datacenter Blackwell replaced it with `tcgen05.mma`; workstation Blackwell has only `mma.sync`. **Neither Blackwell branch runs `wgmma`** — `ptxas` rejects it with `Instruction 'wgmma.mma_async' not supported on .target 'sm_120'`.
+
+`wgmma.async` introduced async-everything-on-the-warp-group. Modern Hopper kernels (FA-3, CUTLASS Hopper templates) lean heavily on it.
+
+### `tcgen05.mma` — Blackwell datacenter only
+
+```ptx
+tcgen05.mma.cta_group::1.kind::mxf4nvf4.block_scale.scale_vec::4X
+    [%tmem_d], %a_desc, %b_desc, %idesc, [%tmem_scale_a], [%tmem_scale_b], %acc;
+//          ^^^^^^^^^^^^ ^^^^^^^^^^^^^^
+//          single CTA   FP4 inputs with block scales
+```
+
+Properties:
+
+- **Asynchronous + decoupled**: even more so than `wgmma`. A and B are given by SMEM matrix descriptors (A may also live in TMEM); the accumulator and the block scales live in **TMEM**. Registers aren't involved at all. The instruction is issued by a **single thread** and takes effectively zero time on the issuing warp.
+- **Larger tiles**: up to M=128, N=256 single-CTA; M=256, N=256 CTA-pair (with `cta_group::2`).
+- **CTA-pair / cluster-2 mode**: each CTA supplies half of the operands from its SMEM and receives half of the result in its TMEM; a single MMA is issued over the larger tile. Requires a cluster dimension of 2. **SM100 only.**
+- **Companion ops**: `tcgen05.alloc` for TMEM allocation, `tcgen05.commit` to signal completion on an mbarrier, `tcgen05.ld` / `tcgen05.st` to move data between TMEM and registers, `tcgen05.cp` to copy from SMEM into TMEM.
+- **SM100 only.** **Does not work on SM120.**
+
+The reason `tcgen05` exists is that at FP4/FP6 throughput levels, the warp-group MMA approach starts to bottleneck on register file bandwidth — the warp can't issue MMA instructions fast enough to keep the Tensor Core busy. By moving accumulators out of registers and into TMEM, the warp issues one `tcgen05.mma`, the Tensor Core runs to completion in TMEM, and the warp can do other work in parallel.
+
+This deep coupling is why `tcgen05` is *not* a simple ISA addition — the entire kernel-design pattern around it (TMEM allocation, async commits, TMA-into-TMEM copies) is its own ecosystem.
+
+## What runs on what
+
+| Instruction family | SM 7.x | SM 8.x | SM 9.0 | SM 10.0 | SM 12.0 |
+| --- | :---: | :---: | :---: | :---: | :---: |
+| `mma.sync` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `wgmma.async` | | | ✓ | | |
+| `tcgen05.mma` (single CTA) | | | | ✓ | |
+| `tcgen05.mma` (CTA-pair) | | | | ✓ | |
+| Block-scaled `mma.sync` (`kind::mxf4nvf4` etc.)¹ | | | | | ✓ |
+
+¹ Requires `sm_120a`; this is how SM 12.0 reaches its native block-scaled FP4/FP6/FP8 without `tcgen05`.
+
+## How CUTLASS chooses
+
+CUTLASS, the reference high-performance GEMM library, has separate template hierarchies for each MMA family:
+
+- `cutlass/include/cutlass/gemm/collective/sm80_*` — Ampere, `mma.sync`-based
+- `cutlass/include/cutlass/gemm/collective/sm90_*` — Hopper, `wgmma`-based
+- `cutlass/include/cutlass/gemm/collective/sm100_*` — Datacenter Blackwell, `tcgen05`-based
+- `cutlass/include/cutlass/gemm/collective/sm120_*` — Workstation Blackwell, `mma.sync`-based (including the block-scaled variants)
+
+When you instantiate a CUTLASS GEMM, you specify the target architecture; the template selects the appropriate MMA family. The SM100 templates target **`sm_100a`** because they need `tcgen05`. The SM120 templates target **`sm_120a`** (the block-scaled `mma.sync` variants are `a`-only) or **`sm_120` / `sm_120f`** and use the older but still effective `mma.sync` path.
+
+This is why a CUTLASS-built library shipped against one target won't run on the other: the actual instructions in the binary are different.
+
+## Performance perspective
+
+At FP4, one m128n256k64 `tcgen05.mma` is 128×256×64 ≈ 2.1 million multiply-accumulates, and the Tensor Core takes many cycles to retire it — nothing is "one per cycle". Working backwards from HGX B200's published dense FP4 peak (9 PFLOPS) and 148 SMs: NVIDIA does not publish the clock, but the rated numbers imply roughly 1.9 GHz (the GPU inside GB200 is rated 10 PFLOPS at roughly 2.1 GHz), and either way you get about 16 thousand FP4 multiply-accumulates per SM per cycle (4 Tensor Cores per SM, about 4 thousand each).
+
+On SM120, without `tcgen05`, you fall back to issuing many `mma.sync m16n8k32` ops to do the same work. The arithmetic throughput per Tensor Core is similar — the Tensor Core hardware is the same — but the *scheduling overhead* (more instructions issued, more register file traffic) reduces achievable throughput.
+
+A rough rule of thumb: an SM120 GEMM kernel reaches **40–70 % of peak SM100 throughput per FLOP**. Now the hardware itself: by NVIDIA's published specs the RTX PRO 6000 Blackwell peaks at about 4 PFLOPS FP4 sparse (about 2 PFLOPS dense), while B200 peaks at about 18 / 9 PFLOPS — **an absolute gap of about 4–5×**. GB202 has more SMs than B200 (188 vs 148) and a higher clock (2.6 GHz vs roughly 1.9 GHz), so per SM per cycle the gap is about 8× — that part is the Tensor Core datapath and the ISA (`tcgen05` / TMEM or not).
+
+## Tile shapes commonly seen
+
+The PTX ISA defines specific allowed tile shapes; libraries instantiate combinations of them. Common ones:
+
+| Family | Tile shape | When |
+| --- | --- | --- |
+| `mma.sync` | m16n8k16 | FP16/BF16 |
+| `mma.sync` | m16n8k32 | FP8 |
+| `mma.sync` | m16n8k64 (`kind::mxf4nvf4.block_scale`) | FP4, `sm_120a` only |
+| `wgmma.async` | m64n{8…256}k{16,32} | Hopper FP16/FP8 |
+| `tcgen05.mma` | m{64,128}n{8…256, step 8}k{16,32,64} | Datacenter Blackwell, single-CTA; block-scaled kinds only have M=128 |
+| `tcgen05.mma` | m{128,256}n{16…256, step 16}k{16,32,64} | Datacenter Blackwell, CTA-pair |
+
+K is always 32 bytes per instruction: 16 for FP16, 8 for TF32, 32 for 8-bit, 64 for 4-bit.
+
+Tile shape selection trades off: larger tiles amortize instruction-issue overhead, smaller tiles fit more occupancy.
+
+## Checkpoint
+
+You should be able to answer:
+
+- What does `m16n8k16` mean?
+- What's the difference between `mma.sync` and `wgmma.async`?
+- Why does `tcgen05.mma` use TMEM instead of registers for accumulators?
+- What target architecture does CUTLASS use for its datacenter Blackwell templates?
+- Roughly how big is the SM100-vs-SM120 throughput gap at FP4?
+
+## See also
+
+- [`memory-hierarchy`](memory-hierarchy.md) — where Tensor Memory fits
+- [`number-formats`](number-formats.md) — FP4/FP6/FP8/BF16 in detail
+- [`blackwell/tcgen05-and-tmem`](../blackwell/tcgen05-and-tmem.md) — the full datacenter-Blackwell story
+- NVIDIA *PTX ISA* spec, sections on MMA / WGMMA / TCGEN05
+- *CUTLASS* documentation, particularly the "Blackwell architecture" section

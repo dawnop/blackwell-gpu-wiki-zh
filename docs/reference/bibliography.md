@@ -5,7 +5,7 @@
 ## NVIDIA 架构与 PTX
 
 - **NVIDIA. *Blackwell Architecture Whitepaper*.** 2024–2025。SM100 和 SM120 设计的权威参考。
-- **NVIDIA. *PTX ISA 8.5 Reference Manual*.** 与 CUDA 12.x / 13.x 同步。包含 `mma.sync`、`tcgen05.*`、`cp.async`、`cp.async.bulk`（TMA）、线程块簇、分布式共享内存的规范。
+- **NVIDIA. *PTX ISA Reference Manual*.**（原文引用 8.5；`tcgen05` 自 8.6 / CUDA 12.8 起，截至 2026 年 9 月为 9.3 / CUDA 13.3）与 CUDA 12.x / 13.x 同步。包含 `mma.sync`、`tcgen05.*`、`cp.async`、`cp.async.bulk`（TMA）、线程块簇、分布式共享内存的规范。
 - **NVIDIA. *CUDA C++ Programming Guide* (current edition).** 关于 Tensor Core、异步拷贝、cooperative groups、cluster 启动的章节。
 - **NVIDIA. *CUDA C++ Best Practices Guide*.** 内存层次的使用建议、占用率调优。
 

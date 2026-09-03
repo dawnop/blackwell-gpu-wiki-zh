@@ -15,12 +15,12 @@ GitHub：`triton-lang/triton`。最初由 OpenAI 开发，现在由社区维护�
 ```python
 @triton.jit
 def matmul_kernel(a_ptr, b_ptr, c_ptr, M, N, K, ...):
-    pid = tl.program_id(axis=0)
-    # ... tile 级别的计算 ...
-    a = tl.load(a_ptrs)
-    b = tl.load(b_ptrs)
-    c = tl.dot(a, b)
-    tl.store(c_ptrs, c)
+  pid = tl.program_id(axis=0)
+  # ... tile 级别的计算 ...
+  a = tl.load(a_ptrs)
+  b = tl.load(b_ptrs)
+  c = tl.dot(a, b)
+  tl.store(c_ptrs, c)
 ```
 
 Triton 编译器负责：
@@ -39,9 +39,11 @@ Triton 3.0+ 支持 SM80 到 SM120。编译器在编译时根据设备生成适�
 - SM80–SM89：`mma.sync`
 - SM90：划算的地方用 `wgmma.async`
 - SM100：大 tile 用 `tcgen05.mma`，其余用 `mma.sync`（还在推进中，不是所有路径都用上了 `tcgen05`）
-- SM120：只有 `mma.sync`，没有 `tcgen05`（译注：原文两行都提到 `wgmma`，Blackwell 上没有它，已改）
+- SM120：只有 `mma.sync`，没有 `tcgen05`
 
 SM120 路径支持得很好。从 Triton 3.0 起就有专门针对 SM120 的测试。
+
+SM100 侧的时间线：Triton 3.3 开始对 `tcgen05` 和 TMEM 建模；3.4 去掉了 TMA 描述符 API 的 `_experimental` 前缀（旧的 `tl._experimental_descriptor_*` 在 3.3+ 删除，锁旧版本的 kernel 会编不过），并首次带上 **Gluon**：`triton.experimental.gluon.language.nvidia.blackwell` 直接暴露 `allocate_tensor_memory`、`TensorMemoryLayout`、`tcgen05_mma` / `tcgen05_mma_scaled`，让你在 Python 里按 warp 特化的方式手写 SM100 kernel，而不是靠编译器自动降级。
 
 ### 常见故障
 
@@ -70,7 +72,7 @@ import transformer_engine.pytorch as te
 
 linear = te.Linear(input_dim, output_dim, params_dtype=torch.bfloat16)
 with te.fp8_autocast(enabled=True, fp8_recipe=te.recipe.DelayedScaling()):
-    y = linear(x)
+  y = linear(x)
 ```
 
 幕后发生的事：
@@ -112,18 +114,18 @@ TransformerEngine 对 SM120 的支持是逐步加上的。截至 2026 年初，�
 
 ```
 推理引擎（sglang、vLLM）
-    │
-    ├─→ FlashInfer（注意力 + MoE）
-    │      │
-    │      ├─→ Triton kernel（带 KV 切分的注意力、专家路由）
-    │      └─→ CUTLASS kernel（NVFP4 GEMM、FP8 GEMM）
-    │
-    └─→ 自定义 Triton kernel（LayerNorm、RoPE、采样）
+  │
+  ├─→ FlashInfer（注意力 + MoE）
+  │   │
+  │   ├─→ Triton kernel（带 KV 切分的注意力、专家路由）
+  │   └─→ CUTLASS kernel（NVFP4 GEMM、FP8 GEMM）
+  │
+  └─→ 自定义 Triton kernel（LayerNorm、RoPE、采样）
 
 训练栈可能还会加上：
-    └─→ TransformerEngine（FP8 Linear、FP8 LayerNorm、FP8 注意力）
-            │
-            └─→ CUTLASS（底层的 GEMM）
+  └─→ TransformerEngine（FP8 Linear、FP8 LayerNorm、FP8 注意力）
+      │
+      └─→ CUTLASS（底层的 GEMM）
 ```
 
 Triton 的定位是 CUTLASS 的替代：有些 kernel 用 DSL 表达比实例化模板更容易。TransformerEngine 则位于 CUTLASS 之上，是一个对 PyTorch 友好的封装。

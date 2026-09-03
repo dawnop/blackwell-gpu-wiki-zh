@@ -1,6 +1,6 @@
 # FlashAttention
 
-让长上下文 transformer 变得可行的那个注意力 kernel。三代：FA-1（2022，基础版）、FA-2（2023，针对 Ampere/Hopper 调优）、FA-3（2024，Hopper 异步版）。截至 2026 年初，FA-3 还没有 Blackwell 移植；FA-2 有。
+让长上下文 transformer 变得可行的那个注意力 kernel。三代：FA-1（2022，基础版）、FA-2（2023，针对 Ampere/Hopper 调优）、FA-3（2024，Hopper 异步版）。FA-3 只有 Hopper；FA-2 能在 Blackwell 上跑；2026 年起 FA4 是 Blackwell 的正式版本（见下文）。
 
 ## 是什么
 
@@ -19,17 +19,18 @@ GitHub：`Dao-AILab/flash-attention`。作者：Tri Dao 及合作者。MIT 协�
 - CUDA toolkit
 - C++17
 - FA-2：Ampere 到 Blackwell 都能跑
-- FA-3：需要 Hopper（按 Hopper 扩展方式设计的数据中心版 Blackwell 也算）
+- FA-3：只有 Hopper（它建在 `wgmma` 上，Blackwell 两个分支都装不上）
+- FA4：Hopper 和 Blackwell 都支持，用 CuTe DSL 写
 
 这个 kernel 基本是自包含的——运行时不依赖 CUTLASS 或其他库，不过 FA-3 内部用了 CUTLASS 风格的抽象。
 
 ## SM100 的情况
 
-**FA-2** 通过通用 kernel 路径跑在 SM100 上，吞吐说得过去但不是最优（走的是 `mma.sync` 路径，没有用 `tcgen05`；译注：原文还写了 `wgmma.async`，Blackwell 上没有它）。
+**FA-2** 通过通用 kernel 路径跑在 SM100 上，吞吐说得过去但不是最优（走的是 `mma.sync` 路径，没有用 `tcgen05`）。
 
-**FA-3** 支持 Hopper（它的主要目标），也能在 SM100 上跑，因为 SM100 大体上是 Hopper 的扩展（cluster、TMA、FP8）。但 FA-3 还没有利用 `tcgen05`——FA-3 在 SM100 上相对 FA-2 的提速和它在 Hopper 上差不多（约 30 %），远不到基于 `tcgen05` 重新设计后能带来的那种大幅提升。
+**FA-3** 在 SM100 上跑不了：它的 mainloop 建在 `wgmma` 上，`sm_90a` 的 cubin 和 PTX 在 Blackwell 上都加载不了。
 
-一个使用 `tcgen05.mma` 的"FA-Blackwell"移植正在开发中。NVIDIA 的 TransformerEngine 里有一个候选实现；社区也在积极推进。
+**FA4** 是真正的 Blackwell 版本：用 CuTe DSL 写，Hopper 和 Blackwell 都支持，`pip install flash-attn-4`（截至 2026 年 9 月 PyPI 上仍标 beta）。B200 上 BF16 前向实测约 1613 TFLOPs/s，约为峰值的 71 %；对比 FA-2 在 B200 上只有 300 到 400 TFLOPs/s。源码在仓库的 `flash_attn/cute/` 目录。
 
 ## SM120 的情况
 
@@ -80,6 +81,8 @@ print(flash_attn.__version__)            # 2.7.x 或 3.x
 ```
 
 ## 接下来会怎样
+
+本节写于 FA4 发布之前，保留作为预测的记录；实际结果见上文 "SM100 的情况"。
 
 原生 Blackwell 的注意力 kernel（QKᵀ 和 softmax-V 两个 GEMM 都用 `tcgen05.mma`）是 FA 家族最受期待的新成员。落地时大概会叫 FA-3.x 或 FA-4。在 B100 上，长序列相对 FA-2 的预期提速很大（2–3 倍）。
 

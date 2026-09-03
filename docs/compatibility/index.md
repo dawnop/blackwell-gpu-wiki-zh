@@ -20,6 +20,8 @@ graph TD
 
 ## 本节页面
 
+- [`hopper-to-sm100`](hopper-to-sm100.md) —— 反方向：把 Hopper 的 kernel 搬到 B200 会踩的坑
+
 - [`translating-tcgen05`](translating-tcgen05.md) —— 把 `tcgen05` PTX 改写成 `mma.sync` 指令链的套路
 - [`smem-budget-management`](smem-budget-management.md) —— 把 kernel 塞进 99 KiB 的 SMEM 上限
 - [`cluster-rewriting`](cluster-rewriting.md) —— 假定 cluster 大小 > 1 的 kernel 该怎么办

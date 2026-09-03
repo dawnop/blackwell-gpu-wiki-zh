@@ -10,7 +10,7 @@
 
 **`sm_NNa`**——"架构专属加速"（architecture-specific accelerated）。允许使用不可移植的指令（例如 `sm_100a` 开启 `tcgen05.*`）。带 `a` 后缀编译出的代码只能在这一个精确的计算能力上运行——早的不行，晚的也不行。
 
-**`sm_NNf`**——"家族专用"（family-specific；译注：原文称 forward-compatible，NVIDIA 的正式叫法是 family-specific）。把代码限制在能在 `sm_NN` 以及同一家族后续架构上运行的指令范围内。适合需要同时在 `sm_120` 工作站芯片和未来任何 `sm_12N` 芯片上运行的代码。
+**`sm_NNf`**——"家族专用"（family-specific）。把代码限制在能在 `sm_NN` 以及同一家族后续架构上运行的指令范围内。适合需要同时在 `sm_120` 工作站芯片和未来任何 `sm_12N` 芯片上运行的代码。
 
 ## 架构与代号
 
@@ -42,7 +42,7 @@
 
 **`mma.sync`**——通用的 Tensor Core MMA 指令，自 Volta 起可用。同步：warp 阻塞直到结果落入寄存器。作用于小 tile（m16n8k16 / m16n8k32）。SM100 和 SM120 上**都**可用。
 
-**`wgmma.async`**——Hopper 的 warp 组异步 MMA。tile 更大，异步执行。只在 `sm_90a` 上可用：数据中心版 Blackwell 换成了 `tcgen05.mma`，工作站版 Blackwell 只有 `mma.sync`（译注：原文多处暗示 Blackwell 也能跑 `wgmma`，按 PTX ISA 已改）。
+**`wgmma.async`**——Hopper 的 warp 组异步 MMA。tile 更大，异步执行。只在 `sm_90a` 上可用：数据中心版 Blackwell 换成了 `tcgen05.mma`，工作站版 Blackwell 只有 `mma.sync`。
 
 **`tcgen05.mma`**——数据中心版 Blackwell 的 MMA 指令族。异步、大 tile（单 CTA 最大 M=128、N=256，CTA pair 最大 M=256、N=256；K 按数据宽度定，FP4 时为 64），累加器放在 TMEM 里。**仅数据中心版可用。** 见 [`blackwell/tcgen05-and-tmem`](../blackwell/tcgen05-and-tmem.md)。
 
@@ -62,9 +62,9 @@
 
 **FP4（E2M1）**——4 位浮点，1 位符号 + 2 位指数 + 1 位尾数。范围极小；只有以**块量化**形式、配上每块一个缩放因子才有用。
 
-**MX-FP4**——Open Compute Project 的微缩放（Microscaling）FP4 规范。32 个元素一块，每块一个 FP6（E3M2）缩放因子。
+**MX-FP4**——Open Compute Project 的微缩放（Microscaling）FP4 规范。32 个元素一块，每块一个 E8M0（8 位、只有指数）缩放因子。
 
-**NVFP4**——NVIDIA 版的 MX-FP4。**16 个元素一块**（块更小，动态范围跟得更紧），每块一个 **FP8（E4M3）缩放因子**（比 FP6 的缩放精度更高）。SM100 和 SM120 的 Tensor Core 都原生支持。见 [`fundamentals/number-formats`](../fundamentals/number-formats.md)。
+**NVFP4**——NVIDIA 版的 MX-FP4。**16 个元素一块**（块更小，动态范围跟得更紧），每块一个 **FP8（E4M3）缩放因子**（比 E8M0 的缩放精度更高）。SM100 和 SM120 的 Tensor Core 都原生支持。见 [`fundamentals/number-formats`](../fundamentals/number-formats.md)。
 
 **TF32**——Ampere 及之后 Tensor Core 内部使用的 19 位格式。1 位符号 + 8 位指数 + 10 位尾数。用于让 FP32 矩阵乘走 Tensor Core 加速。
 
@@ -88,7 +88,7 @@
 
 **MNNVL（Multi-Node NVLink，多节点 NVLink）**——NVL72 级别的 fabric，把 NVLink 扩展到跨机架（最多 72 张 GPU）。
 
-**PCIe**——通用的主机侧互连。Gen4 每 lane 16 GT/s（约 2 GB/s 每方向），Gen5 每 lane 32 GT/s（约 4 GB/s 每方向）。x16 → 每方向约 32 GB/s（Gen4）或 64 GB/s（Gen5）（译注：原文把每 lane 的速率写成 16 / 32 GB/s，那是 GT/s，已改）。
+**PCIe**——通用的主机侧互连。Gen4 每 lane 16 GT/s（约 2 GB/s 每方向），Gen5 每 lane 32 GT/s（约 4 GB/s 每方向）。x16 → 每方向约 32 GB/s（Gen4）或 64 GB/s（Gen5）。
 
 **P2P（peer-to-peer）**——GPU 之间直接访问彼此显存，不经过主机内存中转。GPU 共用同一个交换芯片或 root complex 时可用。
 

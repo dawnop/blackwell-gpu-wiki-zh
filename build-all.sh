@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
-# 构建中英双语站点：site/ 是中文（zh 分支），site/en/ 是英文原文（main 分支，可用 EN_REF 指定）。
+# 构建中英双语站点：site/ 是中文（docs/），site/en/ 是英文（en-src/docs/）。
 set -euo pipefail
 cd "$(dirname "$0")"
 MKDOCS="${MKDOCS:-mkdocs}"
-rm -rf en-src site
-mkdir -p en-src
-git archive "${EN_REF:-main}" docs mkdocs.yml | tar -x -C en-src
+rm -rf site
 mkdir -p en-src/docs/javascripts
 cp docs/javascripts/lang-switch.js en-src/docs/javascripts/
 "$MKDOCS" build --strict

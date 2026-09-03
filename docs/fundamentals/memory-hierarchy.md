@@ -6,18 +6,18 @@
 
 ```mermaid
 graph TD
-    Reg["寄存器<br/>每线程约 256 × 32 位<br/>延迟约 0 周期<br/>线程私有"]
-    SMEM["共享内存（SMEM）<br/>每 block 最多 99 / 228 KiB<br/>延迟约 20 周期<br/>CTA 私有"]
-    L1["L1 缓存<br/>每 SM 约 128 KB（与 SMEM 共用）<br/>延迟约 30 周期"]
-    TMEM["Tensor Memory（TMEM）<br/>仅 SM100 — 每 SM 256 KB<br/>专供 Tensor Core 使用"]
-    L2["L2 缓存<br/>全设备 40-100 MB<br/>延迟约 250 周期"]
-    HBM["全局内存（HBM3e / GDDR7）<br/>每设备 32-192 GB<br/>延迟约 500 周期<br/>1.6-8 TB/s"]
-    Reg --> SMEM
-    SMEM --> L1
-    L1 --> L2
-    L2 --> HBM
-    L1 -.-> TMEM
-    TMEM -.-> L2
+  Reg["寄存器<br/>每线程约 256 × 32 位<br/>延迟约 0 周期<br/>线程私有"]
+  SMEM["共享内存（SMEM）<br/>每 block 最多 99 / 228 KiB<br/>延迟约 20 周期<br/>CTA 私有"]
+  L1["L1 缓存<br/>每 SM 约 128 KB（与 SMEM 共用）<br/>延迟约 30 周期"]
+  TMEM["Tensor Memory（TMEM）<br/>仅 SM100 — 每 SM 256 KB<br/>专供 Tensor Core 使用"]
+  L2["L2 缓存<br/>全设备 50-126 MB<br/>延迟约 250 周期"]
+  HBM["全局内存（HBM3e / GDDR7）<br/>每设备 32-192 GB<br/>延迟约 500 周期<br/>1.6-8 TB/s"]
+  Reg --> SMEM
+  SMEM --> L1
+  L1 --> L2
+  L2 --> HBM
+  L1 -.-> TMEM
+  TMEM -.-> L2
 ```
 
 箭头表示典型计算 kernel 的**数据流**：从全局内存加载 → 暂存到共享内存 → 在寄存器中消费 → 结果沿同一条链路写回。
@@ -66,15 +66,17 @@ CUDA 提供静态 SMEM（编译期定大小，用 `__shared__` 声明）和动�
 - **范围**：warp 组/CTA，通过 `tcgen05.alloc` 分配
 - **延迟**：被异步的 TMA / `tcgen05.commit` 操作掩盖
 
-TMEM 存在的原因是：`tcgen05.mma` 的累加器很大——单 CTA 最大的 m128n256 tile 有 128×256 个 FP32，就是 128 KB；CTA pair 的 m256n256 更是 256 KB（译注：原文写"m256n128k64 的累加器 32 KB"，32K 是元素个数，不是字节数；tile 上限也按 PTX ISA 改了）——远超寄存器能装下的量，放 SMEM 也不合适（会吃掉整个预算）。TMEM 给了 Tensor Core 一块私有的累加器空间，把寄存器和 SMEM 腾出来干别的。
+- **分配**：按列、由一个 warp 执行，资源不够时阻塞而不是失败；不进静态 occupancy 计算。规则见 [`blackwell/tcgen05-and-tmem`](../blackwell/tcgen05-and-tmem.md)
+
+TMEM 存在的原因是：`tcgen05.mma` 的累加器很大——单 CTA 最大的 m128n256 tile 有 128×256 个 FP32，就是 128 KB；CTA pair 的 m256n256 更是 256 KB——远超寄存器能装下的量，放 SMEM 也不合适（会吃掉整个预算）。TMEM 给了 Tensor Core 一块私有的累加器空间，把寄存器和 SMEM 腾出来干别的。
 
 **SM120 没有对应的东西。** 任何用到 TMEM 的 kernel 都必须重写：要么切成更小的 tile（累加器小到能放进寄存器），要么把累加器经由 SMEM 中转（占用那 99 KiB 的预算）。见 [`compatibility/translating-tcgen05`](../compatibility/translating-tcgen05.md)。
 
 ### L1 / L2 缓存
 
-**L1**：每 SM 一份，与 SMEM 共用硬件预算。L1+SMEM 合计在 Hopper/数据中心版 Blackwell 上是每 SM 256 KB（其中最多 228 KB 可配置给 SMEM），在工作站 Blackwell 上是每 SM 128 KB（译注：原文把合计写成 228 KiB，那是 SMEM 可配置的最大值，不是 L1+SMEM 的总量）。L1 与 SMEM 之间的划分是动态的；你申请的 SMEM 划分量决定了 L1 的大小。
+**L1**：每 SM 一份，与 SMEM 共用硬件预算。L1+SMEM 合计在 Hopper/数据中心版 Blackwell 上是每 SM 256 KB（其中最多 228 KB 可配置给 SMEM），在工作站 Blackwell 上是每 SM 128 KB。L1 与 SMEM 之间的划分是动态的；你申请的 SMEM 划分量决定了 L1 的大小。
 
-**L2**：全设备共享，H100 上 40 MB，B100 上 50 MB，B200 上约 96 MB，消费级 Blackwell 上略小一些。L2 缓存对全局内存的访问，掩盖一部分 HBM 延迟。
+**L2**：全设备共享，H100 上 50 MB，B200 上 126 MB，RTX 5080 上 65 MB。L2 缓存对全局内存的访问，掩盖一部分 HBM 延迟。B200 的 L2 是分区的：跨分区访问带宽从约 21 TB/s 降到约 17 TB/s、延迟明显升高；分区数第三方实测有 2 和 4 两种说法，NVIDIA 既没有文档也没有 SM 到分区的映射 API，所以 kernel 层面基本管不了。
 
 缓存基本是自动的，你不直接管理它们。缓存控制提示（`ld.cg`、`ld.cs`、`ld.ca`）可以让你对层级行为稍加引导。
 
@@ -87,10 +89,12 @@ TMEM 存在的原因是：`tcgen05.mma` 的累加器很大——单 CTA 最大�
 | A100 80GB | HBM2e | 80 GB | 2.0 TB/s |
 | H100 80GB | HBM3 | 80 GB | 3.4 TB/s |
 | H200 | HBM3e | 141 GB | 4.8 TB/s |
-| B100 | HBM3e | 192 GB | 8.0 TB/s |
-| B200 | HBM3e | 192 GB | 8.0 TB/s |
+| B200（HGX） | HBM3e | 180 GB | 7.7 TB/s |
+| B200（GB200 超级芯片内） | HBM3e | 186 GB | 8.0 TB/s |
 | RTX PRO 6000 Workstation | GDDR7 | 96 GB | ~1.8 TB/s |
 | RTX 5090 | GDDR7 | 32 GB | ~1.8 TB/s |
+
+192 GB 是物理容量，HGX B200 对用户可见 180 GB。STREAM triad 在 B200 上实测约 4.1 TB/s，是额定值的一半多一点。B200 由两块 die 拼成，die 间互联 10 TB/s，对 CUDA 来说是一个设备；HBM 跨 die 的 NUMA 效应没有任何公开实测。
 
 数据中心 HBM 与消费级 GDDR 之间的带宽差距大约是 **4–5 倍**。对访存受限的负载（长上下文 decode 基本就是这类）来说，这是软件手段无法弥补的架构性能差距之一。
 
@@ -104,25 +108,25 @@ TMEM 存在的原因是：`tcgen05.mma` 的累加器很大——单 CTA 最大�
 - **流水线级数**：为了让加载与计算重叠，通常会在 SMEM 里放 3–4 级操作数。4 级 × 9 KB = 36 KB。
 - **累加器**：128×128 × 4 字节（FP32 累加）= 64 KB。在 SM100 上它放在 TMEM 里。在 SM120 上它只能放寄存器（放不下）或 SMEM（预算会涨到 36 + 64 = 100 KB——*超过*了 99 KiB 的上限）。
 
-这就是 SMEM 断崖的具体形态。CUTLASS 的 Blackwell 模板在 SM100 上靠 TMEM 解决它，SMEM 预算全留给操作数。没有 TMEM 时，模板的 `StageCountAutoCarveout` 会低估可用 SMEM，分配得过于激进，启动后就会破坏相邻的 bank。
+这就是 SMEM 断崖的具体形态。CUTLASS 的 Blackwell 模板在 SM100 上靠 TMEM 解决它，SMEM 预算全留给操作数。没有 TMEM 时，如果模板仍按 228 KiB 的上限算流水线级数，申请的 SMEM 就会超过 99 KiB，`cudaFuncSetAttribute` 或启动会直接报错。
 
 ## 访存相关的 PTX
 
 三种加载指令，按范围排列：
 
 ```ptx
-ld.global.u32 %r0, [%addr];   // 全局内存加载
-ld.shared.u32 %r0, [%addr];   // SMEM 加载
-ld.local.u32  %r0, [%addr];   // 线程本地内存加载（寄存器溢出）
+ld.global.u32 %r0, [%addr];  // 全局内存加载
+ld.shared.u32 %r0, [%addr];  // SMEM 加载
+ld.local.u32 %r0, [%addr];  // 线程本地内存加载（寄存器溢出）
 ```
 
 面向 Tensor Core 的工作还有一些专用加载指令：
 
 ```ptx
-ldmatrix.sync.aligned.x4.shared.b16  ...   // 从 SMEM 加载矩阵 tile（Ampere+）
-cp.async.ca.shared.global             ...   // 异步拷贝 全局→SMEM（Ampere+）
+ldmatrix.sync.aligned.x4.shared.b16 ...  // 从 SMEM 加载矩阵 tile（Ampere+）
+cp.async.ca.shared.global       ...  // 异步拷贝 全局→SMEM（Ampere+）
 cp.async.bulk.tensor.shared::cluster.global ... // TMA（Hopper+，数据中心版）
-tcgen05.cp.cta_group::1.128x256b      ...   // SMEM→TMEM 拷贝（仅数据中心版 Blackwell）
+tcgen05.cp.cta_group::1.128x256b   ...  // SMEM→TMEM 拷贝（仅数据中心版 Blackwell）
 tcgen05.ld.sync.aligned.32x32b.x32.b32 ... // TMEM→寄存器（仅数据中心版 Blackwell）
 ```
 

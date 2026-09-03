@@ -8,15 +8,15 @@
 
 ```mermaid
 graph LR
-    subgraph Datacenter ["数据中心版 Blackwell — SM 10.0"]
-        DC1["GB100 / GB200 / GB300<br/>HBM3e<br/>NVLink 5 / NVSwitch / MNNVL<br/>TMEM（Tensor Memory）<br/>tcgen05 指令族<br/>每 block 228 KiB SMEM<br/>cluster-2 启动"]
-    end
-    subgraph Workstation ["工作站 Blackwell — SM 12.0"]
-        WS1["GB202<br/>RTX PRO 6000 Workstation<br/>RTX 5090 / 5080<br/>GDDR7<br/>仅 PCIe Gen5<br/>无 TMEM<br/>无 tcgen05<br/>每 block 99 KiB SMEM<br/>无 cluster-2"]
-    end
-    Same["两者共有：<br/>第 5 代 Tensor Core<br/>原生 NVFP4 / FP6 / FP8<br/>BF16 / FP16<br/>同一套驱动 / CUDA 工具包"]
-    Same --- DC1
-    Same --- WS1
+  subgraph Datacenter ["数据中心版 Blackwell — SM 10.0"]
+    DC1["GB100 / GB200 / GB300<br/>HBM3e<br/>NVLink 5 / NVSwitch / MNNVL<br/>TMEM（Tensor Memory）<br/>tcgen05 指令族<br/>每 block 228 KiB SMEM<br/>cluster-2 启动"]
+  end
+  subgraph Workstation ["工作站 Blackwell — SM 12.0"]
+    WS1["GB202<br/>RTX PRO 6000 Workstation<br/>RTX 5090 / 5080<br/>GDDR7<br/>仅 PCIe Gen5<br/>无 TMEM<br/>无 tcgen05<br/>每 block 99 KiB SMEM<br/>无 cluster-2"]
+  end
+  Same["两者共有：<br/>第 5 代 Tensor Core<br/>原生 NVFP4 / FP6 / FP8<br/>BF16 / FP16<br/>同一套驱动 / CUDA 工具包"]
+  Same --- DC1
+  Same --- WS1
 ```
 
 Tensor Core 一样，驱动它们的接口却不一样。这个分裂不是渐进的，而是在 ISA 层面非黑即白。不存在什么"兼容模式"。
@@ -33,7 +33,7 @@ Tensor Core 一样，驱动它们的接口却不一样。这个分裂不是渐�
 
 ### 3. 与 SM120 兼容的 PTX 仍会撞上 SMEM 断崖
 
-更隐蔽。很多 CUTLASS 模板在两个目标上都能干净地编译通过，但会申请**每 block 228 KiB 共享内存**，正好贴着数据中心版 Blackwell 的上限。而 SM120 上每 block 的上限是 **99 KiB**。kernel 照样能启动——但多申请的那部分 SMEM 会悄悄破坏相邻的 bank，输出全零或乱码，没有任何错误码。
+更隐蔽。很多 CUTLASS 模板在两个目标上都能干净地编译通过，但会申请**每 block 228 KiB 共享内存**，正好贴着数据中心版 Blackwell 的上限。而 SM120 上每 block 的上限是 **99 KiB**。申请这么多动态 SMEM 会在运行时报错（`cudaErrorInvalidValue` 或启动失败），编译期没有任何提示，上层库还常把错误吞掉。
 
 ### 4. NVLink 换成 PCIe，MoE 吞吐暴跌 30–50 倍
 
@@ -83,7 +83,7 @@ Tensor Core 一样，驱动它们的接口却不一样。这个分裂不是渐�
 
 三个每页都会出现的术语：
 
-- **计算能力**（compute capability，"CC"）——SM 版本号对，例如 `7.0`、`8.0`、`9.0`、`10.0`、`12.0`。小数点前的数字是**主版本号**；小数点后的数字是**次版本号**（译注：原文把两者写反了，已改）。主版本号相同 = ISA 相关；主版本号不同 = 可能不兼容。
+- **计算能力**（compute capability，"CC"）——SM 版本号对，例如 `7.0`、`8.0`、`9.0`、`10.0`、`12.0`。小数点前的数字是**主版本号**；小数点后的数字是**次版本号**。主版本号相同 = ISA 相关；主版本号不同 = 可能不兼容。
 - **`sm_100` / `sm_120` / `sm_100a` / `sm_120f`**——编译器标志用的小写形式。不带后缀的 `sm_NN` 就是架构本身。后缀 `a` 表示"架构专属加速"（使用不可移植的特性）。后缀 `f` 表示"向前兼容"（只使用可移植的特性）。
 - **NVFP4**——NVIDIA 版的 OCP MX-FP4：4 位元素每 16 个一组，每组配一个 FP8（E4M3）缩放因子。在 SM100 和 SM120 上**都是**原生支持——少数在两边行为真正一致的特性之一。
 

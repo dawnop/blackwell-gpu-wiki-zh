@@ -6,7 +6,7 @@
 
 一条 `tcgen05.mma` 指令干的活，相当于很多条 `mma.sync`。翻译的本质是**形状拆分**：
 
-（译注：原文这张表的条数算错了——`mma.sync` 的 N 是 8 不是 16，FP4 在 SM120 上的形状是 m16n8k64；下表按 M/16 × N/8 × K/k 重算。）
+`mma.sync` 的 tile 是 m16n8kK，所以条数是 M/16 × N/8 × K/k；SM120 上 FP4 用的是块缩放的 m16n8k64。
 
 | `tcgen05.mma` 形状 | 等价的 `mma.sync` 条数 | `mma.sync` 形状 |
 | --- | --- | --- |
@@ -31,7 +31,7 @@
 
 原始 SM100 PTX：
 
-（译注：原文示例用的是不存在的指令拼法，下面按 PTX ISA 重写，仍是示意。）
+（示意。）
 
 ```ptx
 // 为 m64n64 的 FP32 累加器分配 64 列 TMEM（128 lane × 64 列 × 4 B = 32 KB，M=64 只用一半 lane）
@@ -43,13 +43,13 @@ tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned;
 
 // 单个线程发射 MMA：D = A * B + D，NVFP4 输入，FP32 累加器，块缩放因子已放在 TMEM
 tcgen05.mma.cta_group::1.kind::mxf4nvf4.block_scale.scale_vec::4X
-    [%tmem_d_addr],         // 累加器位置（TMEM）
-    %a_desc,                // A 描述符（SMEM）
-    %b_desc,                // B 描述符（SMEM）
-    %idesc,                 // 形状 / 类型描述
-    [%tmem_scale_a],
-    [%tmem_scale_b],
-    %acc;                   // 是否累加到旧的 D
+  [%tmem_d_addr],     // 累加器位置（TMEM）
+  %a_desc,        // A 描述符（SMEM）
+  %b_desc,        // B 描述符（SMEM）
+  %idesc,         // 形状 / 类型描述
+  [%tmem_scale_a],
+  [%tmem_scale_b],
+  %acc;          // 是否累加到旧的 D
 
 // 等待完成：commit 到 mbarrier，再 try_wait
 tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [mma_bar];
@@ -67,12 +67,12 @@ tcgen05.dealloc.cta_group::1.sync.aligned.b32 %tmem_d_addr, 64;
 
 ```ptx
 // 在 SMEM 里分配同样大小的空间（算在 99 KiB 预算里）
-.shared .align 16 .b32 smem_d_buf[4096];   // 16 KB / 每个 FP32 4 字节
+.shared .align 16 .b32 smem_d_buf[4096];  // 16 KB / 每个 FP32 4 字节
 
 // 把 A、B 操作数从 SMEM 加载到寄存器
 .reg .b32 %ra<8>;
 .reg .b32 %rb<8>;
-.reg .f32 %rd<32>;     // 累加器放在寄存器里（分摊到各线程）
+.reg .f32 %rd<32>;   // 累加器放在寄存器里（分摊到各线程）
 
 // 初始化累加器（或从上一轮累加器加载）
 mov.f32 %rd0, 0.0;
@@ -80,22 +80,22 @@ mov.f32 %rd0, 0.0;
 
 // 发射一串块缩放 mma.sync m16n8k64（NVFP4 → FP32，sm_120a 专属；缩放因子作为操作数直接传入）
 mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue4m3
-    {%rd0, %rd1, %rd2, %rd3},      // 累加器输出
-    {%ra0, %ra1, %ra2, %ra3},      // 操作数 A（NVFP4 打包）
-    {%rb0, %rb1},                   // 操作数 B（NVFP4 打包）
-    {%rd0, %rd1, %rd2, %rd3},      // 累加器输入
-    %sa, {%bid_a, %tid_a},         // A 的块缩放因子（E4M3）及选择位
-    %sb, {%bid_b, %tid_b};         // B 的块缩放因子
+  {%rd0, %rd1, %rd2, %rd3},   // 累加器输出
+  {%ra0, %ra1, %ra2, %ra3},   // 操作数 A（NVFP4 打包）
+  {%rb0, %rb1},          // 操作数 B（NVFP4 打包）
+  {%rd0, %rd1, %rd2, %rd3},   // 累加器输入
+  %sa, {%bid_a, %tid_a},     // A 的块缩放因子（E4M3）及选择位
+  %sb, {%bid_b, %tid_b};     // B 的块缩放因子
 
 // ... 这个 warp 负责的其余 7 个子 tile 还有 7 条类似的 mma.sync（m64n64 共 32 条，分到 4 个 warp）...
-// （译注：原文用的是不带块缩放的 m16n8k32 e2m1，再手工乘缩放因子；SM120 上真实可用的是上面这条，已改。）
+// 
 
 // 写 SMEM 前先同步 warp
 bar.sync 0;
 
 // 把累加器存到 SMEM（整个 warp 一起）
-st.shared.f32 [%smem_d_buf+0],   %rd0;
-st.shared.f32 [%smem_d_buf+128], %rd1;     // 每个线程存自己的 tile
+st.shared.f32 [%smem_d_buf+0],  %rd0;
+st.shared.f32 [%smem_d_buf+128], %rd1;   // 每个线程存自己的 tile
 // ... 依此类推
 ```
 
@@ -130,7 +130,7 @@ TMEM 分配是翻译的第二个难点。有三种策略：
 对于大累加器（m128 一级），64 KB 寄存器放不下，就暂存到 SMEM：
 
 ```ptx
-.shared .align 16 .b32 smem_accumulator[16384];  // 64 KB
+.shared .align 16 .b32 smem_accumulator[16384]; // 64 KB
 
 // 内层循环里：
 ld.shared.f32 %rd0, [smem_accumulator + offset];
@@ -146,7 +146,7 @@ st.shared.f32 [smem_accumulator + offset], %rd0;
 
 ## 缩放因子的小坑
 
-NVFP4 的缩放因子在两边都由 Tensor Core 内部处理，但拿法不同：SM100 的 `tcgen05.mma.kind::mxf4nvf4.block_scale` 从 **TMEM** 读缩放因子，要求先按特定交错格式把它们搬进去；SM120 的 `mma.sync.kind::mxf4nvf4.block_scale.m16n8k64` 把缩放因子当作**寄存器操作数**传入，每个线程得手里拿着自己那份，还要用 byte-id / thread-id 选择位指明用哪一个。两边搬运缩放因子的代码完全不同，这才是翻译时的坑。（译注：原文说 SM120 的 `mma.sync` 不带缩放、要在 MMA 之后手工乘一次，与 PTX ISA 不符，已改。）
+NVFP4 的缩放因子在两边都由 Tensor Core 内部处理，但拿法不同：SM100 的 `tcgen05.mma.kind::mxf4nvf4.block_scale` 从 **TMEM** 读缩放因子，要求先按特定交错格式把它们搬进去；SM120 的 `mma.sync.kind::mxf4nvf4.block_scale.m16n8k64` 把缩放因子当作**寄存器操作数**传入，每个线程得手里拿着自己那份，还要用 byte-id / thread-id 选择位指明用哪一个。两边搬运缩放因子的代码完全不同，这才是翻译时的坑。
 
 只有当你不用块缩放版 `mma.sync`（例如先把 FP4 反量化成 FP8/BF16 再算普通 MMA）时，才需要把缩放放到 MMA 之后做一次乘法：
 
@@ -174,40 +174,40 @@ mul.f32 %rd_out, %rd_out, %scale_b_combined;
 
 ```python
 def translate_tcgen05(ptx_input, target_arch="sm_120"):
-    instructions = parse_ptx(ptx_input)
-    output = []
-    tmem_to_smem = {}    # TMEM 地址到 SMEM 分配的映射
+  instructions = parse_ptx(ptx_input)
+  output = []
+  tmem_to_smem = {}  # TMEM 地址到 SMEM 分配的映射
 
-    for instr in instructions:
-        if instr.op == "tcgen05.alloc":
-            smem_alloc = allocate_smem(instr.size)
-            tmem_to_smem[instr.dst_reg] = smem_alloc
-            output.append(decl_smem(smem_alloc))
+  for instr in instructions:
+    if instr.op == "tcgen05.alloc":
+      smem_alloc = allocate_smem(instr.size)
+      tmem_to_smem[instr.dst_reg] = smem_alloc
+      output.append(decl_smem(smem_alloc))
 
-        elif instr.op == "tcgen05.mma":
-            shape = instr.tile_shape
-            mma_chain = decompose_to_mma_sync(shape, instr.kind)
-            output.extend(mma_chain)
+    elif instr.op == "tcgen05.mma":
+      shape = instr.tile_shape
+      mma_chain = decompose_to_mma_sync(shape, instr.kind)
+      output.extend(mma_chain)
 
-        elif instr.op == "tcgen05.ld":
-            # 结果本来就在寄存器里；TMEM 地址映射到对应的寄存器/SMEM 位置即可
-            output.append(map_tmem_to_regs(instr.src_addr, instr.dst_regs))
+    elif instr.op == "tcgen05.ld":
+      # 结果本来就在寄存器里；TMEM 地址映射到对应的寄存器/SMEM 位置即可
+      output.append(map_tmem_to_regs(instr.src_addr, instr.dst_regs))
 
-        elif instr.op == "tcgen05.commit":
-            # mma.sync 指令链是同步的；除了 bar.sync 不需要别的屏障
-            output.append("bar.sync 0;")
+    elif instr.op == "tcgen05.commit":
+      # mma.sync 指令链是同步的；除了 bar.sync 不需要别的屏障
+      output.append("bar.sync 0;")
 
-        elif instr.op == "tcgen05.dealloc":
-            pass    # SMEM 分配随作用域自动释放
+    elif instr.op == "tcgen05.dealloc":
+      pass  # SMEM 分配随作用域自动释放
 
-        elif instr.op == "cluster_dim 2,1,1":
-            output.append("cluster_dim 1,1,1")
-            # 警告：如果 kernel 依赖 cluster 协作，必须把它拆开
+    elif instr.op == "cluster_dim 2,1,1":
+      output.append("cluster_dim 1,1,1")
+      # 警告：如果 kernel 依赖 cluster 协作，必须把它拆开
 
-        else:
-            output.append(instr)    # 非 tcgen05 指令原样透传
+    else:
+      output.append(instr)  # 非 tcgen05 指令原样透传
 
-    return emit_ptx(output)
+  return emit_ptx(output)
 ```
 
 这只是概念示意。真实实现（不管是 CUTLASS 里的、Triton 编译器里的，还是独立工具）要处理多得多的情况：流水线用的 mbarrier、异步 TMA、缩放因子格式转换、寄存器压力分析等等。
@@ -216,7 +216,7 @@ def translate_tcgen05(ptx_input, target_arch="sm_120"):
 
 以下几种情况没法机械地翻译：
 
-- **kernel 用了 `tcgen05.shift`**（TMEM 布局变换，SMEM 里没有对应物）
+- **kernel 用了 `tcgen05.shift`**（配合 weight-stationary MMA 的 lane 移位，SMEM 里没有对应物）
 - **kernel 依赖 `cta_group::2` 协作**（没有单 CTA 翻译）
 - **kernel 用了 cluster 共享的 TMA**（`cp.async.bulk.tensor.shared::cluster.global`，需要拆 cluster）
 
@@ -228,4 +228,4 @@ def translate_tcgen05(ptx_input, target_arch="sm_120"):
 - [`cluster-rewriting`](cluster-rewriting.md) —— `cta_group::2` 的翻译
 - [`blackwell/tcgen05-and-tmem`](../blackwell/tcgen05-and-tmem.md) —— `tcgen05` 是什么
 - [`fundamentals/tensor-cores`](../fundamentals/tensor-cores.md) —— `mma.sync` 的背景知识
-- *NVIDIA PTX ISA 8.5*，Tensor Core 指令一节
+- *NVIDIA PTX ISA*（9.3），Tensor Core 指令一节

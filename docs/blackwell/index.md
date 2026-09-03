@@ -28,7 +28,7 @@ graph TD
     WS --> WS_features["• 只有 mma.sync（含块缩放版）<br/>• 无 TMEM<br/>• 有 cluster，无 CTA pair MMA / 硬件 multicast<br/>• 每 block 99 KiB SMEM<br/>• GDDR7<br/>• 只有 PCIe Gen5"]
 
     Both["两者共有"]
-    Both --> Both_features["• 第 5 代 Tensor Core<br/>• 原生 NVFP4 / MX-FP4<br/>• 原生 FP6、FP8<br/>• 同一驱动、同一工具包<br/>• PTX 主版本同为 8"]
+    Both --> Both_features["• 第 5 代 Tensor Core<br/>• 原生 NVFP4 / MX-FP4<br/>• 原生 FP6、FP8<br/>• 同一驱动、同一工具包<br/>• 同一份 PTX ISA"]
 
     DC -.- Both
     WS -.- Both

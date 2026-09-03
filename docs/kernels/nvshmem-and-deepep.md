@@ -97,6 +97,8 @@ GitHub：`deepseek-ai/DeepEP`。协议：MIT。
 
 推荐做法是在工作站 Blackwell 上**根本不要用 DeepEP**，把 EP 方案换成不需要 all-to-all 的 TP+PP 方案。
 
+**在 B200 上**：DeepEP 上游 README 至今只写 Hopper。代码里有 `__CUDA_ARCH__ >= 1000` 的分支和 UE8M0 缩放因子的对接，能编；GB200 NVL72 的 issue 仍是 open 状态，NVL72 域需要 Fabric Manager 加 IMEX。2026 年 4 月的 V2 把后端换成了 NCCL Gin。NVSHMEM 侧的门槛：3.2.5 支持 B200 的 NVLink 5，3.3.9 起 NVL72 GA。
+
 ## 用 NCCL 回退
 
 NCCL（NVIDIA Collective Communications Library）提供标准的集合通信操作：`all_reduce`、`all_gather`、`reduce_scatter`、`all_to_all`。和 NVSHMEM 不同，NCCL 是**双边**的，而且能跑在任何后端上（NVLink、PCIe、IB，甚至 TCP）。

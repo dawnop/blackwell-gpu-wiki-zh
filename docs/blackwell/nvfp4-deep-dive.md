@@ -9,9 +9,9 @@ NVIDIA 版的 OCP MX-FP4。它是唯一一个在 Blackwell 两个分支上真正
 ```
 块布局（内存中）：
 +-------------------------------------+----------+
-| 16 × 4 位值（打包成 8 字节）           | 缩放因子  |
+| 16 × 4 位值（打包成 8 字节）      | 缩放因子 |
 +-------------------------------------+----------+
-                                      8 位
+                   8 位
 
 合计：每 16 个值占 9 字节 = 每个值 4.5 位
 ```
@@ -26,6 +26,8 @@ value(i, b) = decode_e2m1(packed[b][i]) × decode_e4m3(scale[b])
 
 块级缩放因子给了这个格式有效的动态范围：每块缩放因子从 10⁻⁴ 到 10² 乘以 E2M1 的范围，得到一个横跨多个数量级的可用工作范围。
 
+块缩放因子之外，NVFP4 还约定一个每张量的 FP32 缩放因子。它是软件层面的约定，不进 MMA 指令：kernel 在 epilogue 里自己乘。
+
 ## NVFP4 与 MX-FP4：关键差异
 
 OCP MX-FP4 标准结构类似，但参数不同：
@@ -33,14 +35,15 @@ OCP MX-FP4 标准结构类似，但参数不同：
 | | MX-FP4（OCP） | NVFP4（NVIDIA） |
 | --- | --- | --- |
 | 块大小 | 32 个元素 | **16 个元素** |
-| 缩放因子类型 | FP6（E3M2） | **FP8（E4M3）** |
-| 每元素有效位数 | ~4.19 | ~4.50 |
+| 缩放因子类型 | E8M0（8 位，只有指数） | **FP8（E4M3）** |
+| 每元素有效位数 | 4.25 | 4.50 |
+
 | 采用者 | AMD、Intel、ARM、NVIDIA | NVIDIA |
 
-NVFP4 用**略多一点的存储**（每元素 4.5 位对 4.19 位，约 7 % 的开销）换来**两个实际好处**：
+NVFP4 用**略多一点的存储**（每元素 4.5 位对 4.25 位，约 6 % 的开销）换来**两个实际好处**：
 
 1. **更小的块**意味着数值分布不均匀的张量（比如某些通道有离群值）能拿到更贴合的缩放因子。经验数据：在相同有效码率下，大多数 LLM 基准上比 MX-FP4 的困惑度改善约 0.3–0.5。
-2. **FP8 缩放因子**的精度大约是 FP6 缩放因子的 16 倍，减少了缩放因子本身量化带来的误差。对权重幅值极端的层来说这很重要。
+2. **E4M3 缩放因子**带 3 位尾数，而 E8M0 只能取 2 的整数次幂，缩放因子本身的相对分辨率相差 8 倍，减少了缩放因子量化带来的误差。对权重幅值极端的层来说这很重要。
 
 两种格式都能在 Blackwell 的 Tensor Core（第五代）上原生运行。Hopper 硬件通过 FP8 Tensor Core 模拟它们，吞吐会打折。
 
@@ -53,7 +56,7 @@ NVFP4 用**略多一点的存储**（每元素 4.5 位对 4.19 位，约 7 % 的
 | FP32 | ~1.9 TB |
 | BF16 / FP16 | ~960 GB |
 | FP8 | ~480 GB |
-| MX-FP4（4.19 位/元素） | ~250 GB |
+| MX-FP4（4.25 位/元素） | ~255 GB |
 | **NVFP4（4.5 位/元素）** | **~270 GB** |
 
 实际上，NVFP4 把一个 BF16 模型压到大约**原来的 28 %**，原本需要 8 倍显存的模型也能装下。对工作站版 Blackwell 来说，96 GB 的卡 × 4 = 384 GB 总显存，可以放下约 700B 参数的权重，还给 KV cache 留有余地。
@@ -63,24 +66,24 @@ NVFP4 用**略多一点的存储**（每元素 4.5 位对 4.19 位，约 7 % 的
 在 Blackwell 上，一个 NVFP4 GEMM 会编译成以 NVFP4 为输入、输出 FP32（或 BF16、FP8）的 MMA 指令。反量化发生在 **Tensor Core 内部**——MMA 之前不需要单独的"反量化 kernel"。
 
 ```ptx
-// 数据中心版 Blackwell（SM100）—— 使用 tcgen05（译注：原文拼法不存在，已按 PTX ISA 改写）
+// 数据中心版 Blackwell（SM100）—— 使用 tcgen05
 tcgen05.mma.cta_group::1.kind::mxf4nvf4.block_scale.scale_vec::4X
-    [%tmem_d],              // TMEM 里的 FP32 累加器
-    %a_desc,                // NVFP4 操作数 A 的 SMEM 描述符
-    %b_desc,                // NVFP4 操作数 B 的 SMEM 描述符
-    %idesc,                 // 形状 / 类型描述
-    [%tmem_sfa], [%tmem_sfb], // E4M3 缩放因子（放在 TMEM 里）
-    %acc;
+  [%tmem_d],       // TMEM 里的 FP32 累加器
+  %a_desc,        // NVFP4 操作数 A 的 SMEM 描述符
+  %b_desc,        // NVFP4 操作数 B 的 SMEM 描述符
+  %idesc,         // 形状 / 类型描述
+  [%tmem_sfa], [%tmem_sfb], // E4M3 缩放因子（放在 TMEM 里）
+  %acc;
 
 // 工作站版 Blackwell（SM120，sm_120a）—— 使用块缩放 mma.sync 链
 // （对更大逻辑 tile 中的每个 m16n8k64 子 tile：）
 mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue4m3
-    {%rd0, %rd1, %rd2, %rd3},     // FP32 累加器
-    {%ra0, %ra1, %ra2, %ra3},     // NVFP4 操作数 A
-    {%rb0, %rb1},                  // NVFP4 操作数 B
-    {%rc0, %rc1, %rc2, %rc3},      // FP32 输入累加器
-    %sfa, {%bid_a, %tid_a},        // A 的 E4M3 缩放因子（寄存器）及选择位
-    %sfb, {%bid_b, %tid_b};        // B 的缩放因子
+  {%rd0, %rd1, %rd2, %rd3},   // FP32 累加器
+  {%ra0, %ra1, %ra2, %ra3},   // NVFP4 操作数 A
+  {%rb0, %rb1},         // NVFP4 操作数 B
+  {%rc0, %rc1, %rc2, %rc3},   // FP32 输入累加器
+  %sfa, {%bid_a, %tid_a},    // A 的 E4M3 缩放因子（寄存器）及选择位
+  %sfb, {%bid_b, %tid_b};    // B 的缩放因子
 ```
 
 两条路径用的是**同一套 Tensor Core 硬件**，区别只在发射指令。SM100 的 `tcgen05.mma.kind::mxf4nvf4` 异步地把更大的 tile 发射到 TMEM；SM120 的块缩放 `mma.sync.m16n8k64` 同步地把更小的 tile 发射到寄存器。
@@ -100,7 +103,9 @@ mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64.row.col.f32.e
 
 CUTLASS 的 NVFP4 GEMM 模板每个模板假定一种特定布局。DeepGEMM 用的是另一种。FlashInfer 又是一种。**把以某种布局存储的权重文件加载进期望另一种布局的 kernel，产出的是静默的垃圾数据。**
 
-"MX-FP4 还是 NVFP4"的混淆让事情更复杂：一个 kernel 可能标着"MX-FP4"，实际却期望 NVFP4 布局（因为开发者拷了一份 NVFP4 参考实现然后改了名）。缩放因子明明是 FP8 却按 FP6 来读，每一块都会被读坏。
+在 SM100 上，硬件这一侧的布局其实是定死的：`tcgen05.mma.kind::mxf4nvf4.block_scale` 从 TMEM 读缩放因子，CUTLASS 规定的 GMEM / SMEM 布局是 512 字节的基本块（128 行 × K 方向 4 个缩放因子），经 `tcgen05.cp` 搬进 TMEM 并复制到 4 个 lane 分区，cuBLAS 用同一布局且不允许转置。上面表里的花样都发生在**模型文件到 kernel 输入**这一段，最终喂给 Tensor Core 的只有一种。
+
+"MX-FP4 还是 NVFP4"的混淆让事情更复杂：一个 kernel 可能标着"MX-FP4"，实际却期望 NVFP4 布局（因为开发者拷了一份 NVFP4 参考实现然后改了名）。缩放因子明明是 16 个一组的 E4M3 却按 32 个一组的 E8M0 来读，每一块都会被读坏。
 
 当一个"本该能跑"的模型在工作站版 Blackwell 上输出乱码时，缩放因子布局不匹配是前三大原因之一（另外两个是 SMEM 断崖和 EP 方案）。
 
@@ -122,9 +127,9 @@ my-model-NVFP4/
 ├── config.json
 ├── tokenizer.json
 ├── chat_template.jinja
-├── model.safetensors           # NVFP4 打包的权重
-├── scales.safetensors          # FP8 E4M3 缩放因子
-├── quantization_config.json    # block_size: 16, scale_dtype: fp8_e4m3
+├── model.safetensors      # NVFP4 打包的权重
+├── scales.safetensors     # FP8 E4M3 缩放因子
+├── quantization_config.json  # block_size: 16, scale_dtype: fp8_e4m3
 └── ...
 ```
 
@@ -146,7 +151,7 @@ NVFP4 与最好的 INT4 方案不相上下，略优于 MX-FP4。它真正的优�
 
 ## REAP 与 NVFP4 联用
 
-REAP（Router-weighted Expert Activation Pruning，按路由权重的专家激活剪枝；译注：原文此处展开成 REbalanced Activation Pruning，与缩写表和论文不一致，已统一）是一种 MoE 专用的剪枝技术，会把整个专家从模型里去掉。和 NVFP4 量化结合，REAP 能产出质量损失极小的紧凑模型：
+REAP（Router-weighted Expert Activation Pruning，按路由权重的专家激活剪枝）是一种 MoE 专用的剪枝技术，会把整个专家从模型里去掉。和 NVFP4 量化结合，REAP 能产出质量损失极小的紧凑模型：
 
 - 原始 GLM-5.1：744B 参数，BF16 约 1.5 TB
 - REAP-160（256 个专家保留 160 个）：478B 参数，BF16 约 960 GB

@@ -4,9 +4,9 @@ kernel 假定 cluster 大小 > 1，却要跑在 cluster 不可用的硬件上，
 
 ## 问题是什么
 
-线程块簇（cluster，见 [`blackwell/thread-block-clusters`](../blackwell/thread-block-clusters.md)）把多个 CTA 编成一组，组内可以通过分布式共享内存互相访问 SMEM。在 SM100 上，大小 2–8 的 cluster 是家常便饭。在 SM120 上，cluster 和分布式共享 SMEM 本身是有的（最多 8），真正没有的是 **CTA pair MMA（`cta_group::2`）和硬件加速的 multicast TMA**（译注：原文称 SM120 唯一安全的 cluster 大小是 1、没有 cluster 级共享 SMEM，与 CUDA 编程指南不符，已改）。
+线程块簇（cluster，见 [`blackwell/thread-block-clusters`](../blackwell/thread-block-clusters.md)）把多个 CTA 编成一组，组内可以通过分布式共享内存互相访问 SMEM。在 SM100 上，大小 2–8 的 cluster 是家常便饭。在 SM120 上，cluster 和分布式共享 SMEM 本身是有的（最多 8），真正没有的是 **CTA pair MMA（`cta_group::2`）和硬件加速的 multicast TMA**。
 
-如果 kernel 依赖这两项，就必须改写。下面几种思路仍然适用，只是动机从"没有 cluster"变成"没有 pair MMA / multicast"。有四种思路（译注：原文写"三种"，下文实际列了四种）。
+如果 kernel 依赖这两项，就必须改写。下面几种思路仍然适用，只是动机从"没有 cluster"变成"没有 pair MMA / multicast"。有四种思路。
 
 ## 思路 1：塌缩成单 CTA
 
@@ -16,17 +16,17 @@ kernel 假定 cluster 大小 > 1，却要跑在 cluster 不可用的硬件上，
 // 原版 SM100
 __cluster_dims__(2, 1, 1)
 __global__ void kernel(...) {
-    // 每个 CTA 处理半个 tile，
-    // 通过分布式共享内存访问邻居的 SMEM
-    auto neighbor_smem = cg::cluster_group::block_index({1, 0, 0});
-    ...
+  // 每个 CTA 处理半个 tile，
+  // 通过分布式共享内存访问邻居的 SMEM
+  auto neighbor_smem = cg::cluster_group::block_index({1, 0, 0});
+  ...
 }
 
 // SM120 改写：每个 CTA 独立完成整个半 tile
 __global__ void kernel(...) {
-    // cluster_dim 隐含为 1
-    // 没有跨 CTA 的 SMEM 访问
-    ...
+  // cluster_dim 隐含为 1
+  // 没有跨 CTA 的 SMEM 访问
+  ...
 }
 ```
 
@@ -47,21 +47,21 @@ cluster **只是方便、并非必需**时，这招管用。
 // 原版：m256n128 协作 MMA
 __cluster_dims__(2, 1, 1)
 __global__ void mma_cluster_pair(...) {
-    if (cluster_block_id() == 0) {
-        // 通过 tcgen05.mma.cta_group::2 产出上半部分
-    } else {
-        // 用下半部分的数据为上半部分做贡献
-    }
+  if (cluster_block_id() == 0) {
+    // 通过 tcgen05.mma.cta_group::2 产出上半部分
+  } else {
+    // 用下半部分的数据为上半部分做贡献
+  }
 }
 
 // SM120 改写：两条独立的 m128n128 MMA
 __global__ void mma_independent(int half_id, ...) {
-    if (half_id == 0) {
-        // 用单 CTA mma 产出上面的 m128n128 tile
-    } else {
-        // 用单 CTA mma 产出下面的 m128n128 tile
-    }
-    // 调用方分别以 half_id=0 和 half_id=1 启动
+  if (half_id == 0) {
+    // 用单 CTA mma 产出上面的 m128n128 tile
+  } else {
+    // 用单 CTA mma 产出下面的 m128n128 tile
+  }
+  // 调用方分别以 half_id=0 和 half_id=1 启动
 }
 ```
 
@@ -101,12 +101,12 @@ float val = gmem_buf[neighbor_block_id * N + idx];
 怎么知道一个 kernel 用了 cluster？找这些：
 
 ```cuda
-__cluster_dims__(X, Y, Z)         // CUDA C++ 属性
-.cluster_dim X, Y, Z;              // PTX 指示
-cooperative_groups::cluster_group  // C++ API
-__cluster_size_in_blocks           // 内建函数
-distributed_shared_memory_address  // 分布式共享内存访问
-cg::cluster_barrier                // cluster 范围的 barrier
+__cluster_dims__(X, Y, Z)     // CUDA C++ 属性
+.cluster_dim X, Y, Z;       // PTX 指示
+cooperative_groups::cluster_group // C++ API
+__cluster_size_in_blocks      // 内建函数
+distributed_shared_memory_address // 分布式共享内存访问
+cg::cluster_barrier        // cluster 范围的 barrier
 ```
 
 在已编译的二进制里，去 cubin 的 PTX 段找 `cluster_dim` 指示。
@@ -115,41 +115,41 @@ cg::cluster_barrier                // cluster 范围的 barrier
 
 ```python
 def collapse_cluster_dims(ptx_input, target_arch="sm_120"):
-    out = []
-    cluster_was_active = False
-    cluster_size = (1, 1, 1)
+  out = []
+  cluster_was_active = False
+  cluster_size = (1, 1, 1)
 
-    for line in ptx_input:
-        if line.startswith(".cluster_dim"):
-            cluster_size = parse_cluster_dim(line)
-            if cluster_size != (1, 1, 1):
-                cluster_was_active = True
-                out.append(".cluster_dim 1, 1, 1")
-            else:
-                out.append(line)
+  for line in ptx_input:
+    if line.startswith(".cluster_dim"):
+      cluster_size = parse_cluster_dim(line)
+      if cluster_size != (1, 1, 1):
+        cluster_was_active = True
+        out.append(".cluster_dim 1, 1, 1")
+      else:
+        out.append(line)
 
-        elif "cluster_block_id" in line:
-            if cluster_was_active:
-                # 这个块原本想知道自己在 cluster 里的位置。
-                # 既然塌缩了，答案永远是 0。
-                out.append("    mov.b32 %ret, 0;    // collapsed cluster")
-            else:
-                out.append(line)
+    elif "cluster_block_id" in line:
+      if cluster_was_active:
+        # 这个块原本想知道自己在 cluster 里的位置。
+        # 既然塌缩了，答案永远是 0。
+        out.append("  mov.b32 %ret, 0;  // collapsed cluster")
+      else:
+        out.append(line)
 
-        elif "shared::cluster" in line:
-            # 分布式共享内存访问——必须用全局内存模拟
-            out.extend(emit_global_emulation(line))
+    elif "shared::cluster" in line:
+      # 分布式共享内存访问——必须用全局内存模拟
+      out.extend(emit_global_emulation(line))
 
-        elif "tcgen05.mma.cta_group::2" in line:
-            # 协作 MMA——必须拆开（无法机械翻译）
-            out.append(f"// FATAL: cta_group::2 has no SM120 equivalent")
-            out.append(f"// Original: {line}")
-            raise NotMechanicallyTranslatable(line)
+    elif "tcgen05.mma.cta_group::2" in line:
+      # 协作 MMA——必须拆开（无法机械翻译）
+      out.append(f"// FATAL: cta_group::2 has no SM120 equivalent")
+      out.append(f"// Original: {line}")
+      raise NotMechanicallyTranslatable(line)
 
-        else:
-            out.append(line)
+    else:
+      out.append(line)
 
-    return out
+  return out
 ```
 
 机械翻译对塌缩（思路 1）和全局内存模拟（思路 3）行得通。对协作计算（思路 2），自动翻译不现实：kernel 必须在源码层面拆开。

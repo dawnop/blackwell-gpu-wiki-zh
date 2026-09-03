@@ -6,17 +6,17 @@
 
 ```mermaid
 flowchart LR
-    SRC[".cu 源文件"] --> NVCC["nvcc"]
-    NVCC --> HOSTOBJ["host .o<br/>（CPU 侧 C++）"]
-    NVCC --> PTX[".ptx<br/>虚拟 ISA"]
-    PTX --> PTXAS["ptxas"]
-    PTXAS --> CUBIN["cubin<br/>sm_NN 的 SASS"]
-    CUBIN --> FATBIN[".fatbin<br/>多架构容器"]
-    HOSTOBJ --> EXE["host 可执行文件"]
-    FATBIN --> EXE
-    EXE -.运行时.-> DRIVER["驱动"]
-    DRIVER --> JIT["没有匹配的 cubin 时<br/>JIT 编译 PTX"]
-    DRIVER --> LAUNCH["在 SM 上启动 SASS"]
+  SRC[".cu 源文件"] --> NVCC["nvcc"]
+  NVCC --> HOSTOBJ["host .o<br/>（CPU 侧 C++）"]
+  NVCC --> PTX[".ptx<br/>虚拟 ISA"]
+  PTX --> PTXAS["ptxas"]
+  PTXAS --> CUBIN["cubin<br/>sm_NN 的 SASS"]
+  CUBIN --> FATBIN[".fatbin<br/>多架构容器"]
+  HOSTOBJ --> EXE["host 可执行文件"]
+  FATBIN --> EXE
+  EXE -.运行时.-> DRIVER["驱动"]
+  DRIVER --> JIT["没有匹配的 cubin 时<br/>JIT 编译 PTX"]
+  DRIVER --> LAUNCH["在 SM 上启动 SASS"]
 ```
 
 关键在于，`.cu` 源码要经过**两步编译**：一步高层的（`nvcc` / NVCC 的 PTX 后端），一步低层的（`ptxas`）。每一步都可能因为不同的原因成功或失败。
@@ -34,11 +34,11 @@ PTX（**Parallel Thread eXecution**）是 NVIDIA 的**虚拟 ISA**——一种�
 用 `--gpu-architecture`（或 `-arch`）指定目标 PTX 版本：
 
 ```
-nvcc -arch=compute_100 ...   # 面向计算能力 10.0 的 PTX
-nvcc -arch=compute_120 ...   # 面向计算能力 12.0 的 PTX
+nvcc -arch=compute_100 ...  # 面向计算能力 10.0 的 PTX
+nvcc -arch=compute_120 ...  # 面向计算能力 12.0 的 PTX
 ```
 
-PTX **在同一大版本内向前兼容**：面向 `compute_70` 的 PTX 可以被 JIT 编译后跑在任何更新的架构上（8.0、9.0、10.0、12.0）。面向 `compute_100` 的 PTX 只能跑在 10.0 及之后的 1x.x 架构上，但**不能**跑在 12.0 上（因为 10.0 引入了 `tcgen05` 这类 12.0 不支持的指令——它们是 1x 家族里的不同"分支"）。
+PTX **向前兼容**：不带后缀的 PTX（`compute_70`、`compute_90`、`compute_100`）可以被 JIT 编译后跑在任何计算能力更高的设备上。带 `a` 的 PTX 不行：`compute_100a` 的 PTX 只能在 10.0 上跑，`compute_90a` 的 PTX 在 Blackwell 上根本加载不了。`tcgen05` 只在 `compute_100a` 里，不带后缀的 `compute_100` 没有它。
 
 ### 这一步会出什么问题
 
@@ -53,15 +53,15 @@ PTX **在同一大版本内向前兼容**：面向 `compute_70` 的 PTX 可以�
 用 `--gpu-code`（或 `-code`）指定目标 SASS 架构：
 
 ```
-ptxas --gpu-name=sm_100  ...
-ptxas --gpu-name=sm_120  ...
+ptxas --gpu-name=sm_100 ...
+ptxas --gpu-name=sm_120 ...
 ```
 
 或者和 `nvcc` 一起用：
 
 ```
-nvcc -gencode arch=compute_100,code=sm_100   ...
-nvcc -gencode arch=compute_120,code=sm_120   ...
+nvcc -gencode arch=compute_100,code=sm_100  ...
+nvcc -gencode arch=compute_120,code=sm_120  ...
 ```
 
 `-gencode` 这种写法会为指定架构生成 SASS，*同时*嵌入 PTX（如果二进制跑在一个不在 gencode 列表里的未来架构上，PTX 可以被 JIT 编译）。
@@ -74,14 +74,18 @@ NVIDIA 引入了两个后缀来管理架构专属特性：
 | --- | --- | --- |
 | （无） | 该架构的"可移植"子集 | `sm_100` |
 | `a` | "架构专属加速"——使用不可移植的特性。代码*只能*跑在这一个架构上。 | `sm_100a` |
-| `f` | "家族专用"（family-specific）——只允许使用在本架构以及同一家族后续架构上都会存在的指令（译注：原文称"向前兼容"，NVIDIA 的正式叫法是 family-specific） | `sm_120f` |
+| `f` | "家族专用"（family-specific）——只允许使用在本架构以及同一家族后续架构上都会存在的指令 | `sm_120f` |
 
-实际使用中：
+实际使用中（`f` 后缀从 CUDA 12.9 起才有）：
 
-- **`sm_100a`** 允许 `tcgen05` 指令、MNNVL fabric 调用以及其他 GB100 专属特性。编出来的 SASS 只能跑在 10.0 设备上。
-- **`sm_100`** 是更保守的目标，不含上述特性。
-- **`sm_120a`** 允许 GB202 专属特性（例如只在消费级 Blackwell 上才有的某些 Tensor Core 变体），只能跑在 12.0 上。
-- **`sm_120f`** 是"家族"子集，能跑在 `sm_120` 和同一家族之后的 12.x 架构上。适合要覆盖一大批消费级 Blackwell 型号的库。
+- **`sm_100`**（不带后缀）：最保守，**没有 `tcgen05`、TMEM、`cta_group`**。写 `sm_100` 等于自废武功。PyTorch 官方 wheel 的 `TORCH_CUDA_ARCH_LIST` 就是不带 a 的 `10.0`，自己编 CUTLASS 类扩展要显式写 `10.0a`。
+- **`sm_100a`**：全部 GB100 专属特性。特性集合的包含关系是 compute_100 ⊂ compute_100f ⊂ compute_100a。编出来的 SASS 只能跑在 10.0 设备上，10.3（B300）都不行。
+- **`sm_100f`**：`tcgen05` 主体、TMEM、`cta_group::2`、`setmaxnreg` 都在 f 级；只留在 a 级的是 `kind::i8`、`kind::mxf4 / mxf4nvf4`、随机舍入的 `cvt .rs` 和 `.s2f6x2`。f 级产物在 10.0 和 10.3（B200 和 B300）上都能跑，不能跑 12.x。想一份二进制同时覆盖 B200 和 B300，就编 `sm_100f`。
+- **`sm_103a`**：B300 / GB300 专属，比 `sm_100a` 多 K=96、描述符字节寻址模式、96B swizzle、`tcgen05.ld.red`。
+- **`sm_120a`**：GB202 专属，主要是块缩放的 `mma.sync`（`kind::mxf4nvf4.block_scale` 等）。
+- **`sm_120f`**：能跑在 `sm_120` 和同一家族之后的 12.x 架构上。
+
+判断当前编译目标的宏：`__CUDA_ARCH_SPECIFIC__`（a 目标时定义，值如 1000）和 `__CUDA_ARCH_FAMILY_SPECIFIC__`（a 或 f 目标时定义）有官方文档；`__CUDA_ARCH_FEAT_SM100_ALL` 官方没写但 CUTLASS 在用。CUTLASS 自己的开关是 `CUTLASS_ARCH_MMA_SM100_SUPPORTED / _ENABLED`、`CUTLASS_ARCH_MMA_SM100A_ENABLED` 和 CuTe 的 `CUTE_ARCH_TCGEN05_TMEM_ENABLED`。手写内联 `tcgen05` PTX 时要用这些宏守住：`nvcc -arch=sm_100a` 还会顺带生成一遍不带 a 的 PTX，裸 asm 落到那一遍里 ptxas 就报 "tcgen05.fence not supported on sm_100"。
 
 NVIDIA 自家的库里就能看到后缀的选择：
 
@@ -103,11 +107,11 @@ NVIDIA 自家的库里就能看到后缀的选择：
 
 ```
 nvcc -gencode arch=compute_80,code=sm_80 \
-     -gencode arch=compute_90,code=sm_90 \
-     -gencode arch=compute_100,code=sm_100a \
-     -gencode arch=compute_120,code=sm_120 \
-     -gencode arch=compute_120,code=compute_120 \
-     ...
+   -gencode arch=compute_90,code=sm_90 \
+   -gencode arch=compute_100,code=sm_100a \
+   -gencode arch=compute_120,code=sm_120 \
+   -gencode arch=compute_120,code=compute_120 \
+   ...
 ```
 
 最后一行（`code=compute_120`）嵌入的是 `compute_120` 的 **PTX**，在没有匹配 cubin 的情况下，驱动可以在加载时把它 JIT 编译成 SASS。
@@ -115,9 +119,9 @@ nvcc -gencode arch=compute_80,code=sm_80 \
 ### 查看 fatbin 内容
 
 ```bash
-cuobjdump --list-elf  myapp           # 看里面有哪些架构
-cuobjdump --dump-elf  myapp           # 导出 SASS
-cuobjdump --dump-ptx  myapp           # 导出嵌入的 PTX
+cuobjdump --list-elf myapp      # 看里面有哪些架构
+cuobjdump --dump-elf myapp      # 导出 SASS
+cuobjdump --dump-ptx myapp      # 导出嵌入的 PTX
 ```
 
 实践中就是靠这个发现，某个预编译的库只面向 `sm_100a` 而不是 `sm_120`——它的 fatbin 里只有 `sm_100a` 的 cubin。
@@ -135,6 +139,25 @@ SM120 去加载一个只有 SM100 的 fatbin，就会在这一步失败。**这�
 
 驱动会把 JIT 结果跨运行缓存起来，所以第一次启动慢，之后就快了。Linux 上缓存位于 `~/.nv/ComputeCache/`。
 
+## Hopper 的二进制到了 B200 会怎样
+
+反过来的方向，把 H100 上的东西搬到 B200，规则是：
+
+- **`sm_90a` 的 cubin 和 PTX 都加载不了。** Blackwell 兼容性指南原话："PTX compiled for compute_90a (Hopper) are not supported on the Blackwell architecture"。`wgmma` 全家（`mma_async / fence / commit_group / wait_group`）在 PTX 里都只有 "Requires sm_90a"。
+- **`sm_90`（不带 a）的 cubin 也不行。** cubin 只能在同一主版本、次版本不低的设备上跑，9 → 10 是换主版本。
+- **只有不带 a 的 PTX 能 JIT。** 所以一个只嵌了 `sm_90a` cubin、没嵌 `compute_90` PTX 的库，在 B200 上就是 "no kernel image"。用 `CUDA_FORCE_PTX_JIT=1` 跑一遍能验证自己的二进制到底有没有可用的 PTX。
+- `mma.sync` 在 `sm_100` 上仍然支持，是唯一不重写就能跑的 MMA 路径；吞吐低于 `wgmma`，更低于 `tcgen05`。
+
+版本门槛：
+
+| 组件 | B200 最低 | 备注 |
+| --- | --- | --- |
+| CUDA | 12.8（PTX ISA 8.6） | 12.9 加 `f` 后缀和 `sm_103`；13.0 把 `sm_101` 改名 `sm_110`（Thor），删了 Maxwell/Pascal/Volta，没删任何 `sm_100` 目标 |
+| 驱动 | 570.26（12.8）/ 575.51.03（12.9）/ 580.65.06（13.0） | |
+| CUTLASS | 3.8 | 4.0 起有 CuTe DSL |
+
+CUDA 13.0 还删掉了 `cudaDeviceProp` 里的 `clockRate`、`memoryClockRate`、`computeMode`、`kernelExecTimeoutEnabled` 等字段，改用 `cudaDeviceGetAttribute` 查。老的测试 harness 读这些字段的，在 13.0 下编不过。
+
 ## 实例：追查一个 `tcgen05` 错误
 
 假设你 `pip install` 了一个 kernel 库，在 SM120 的卡上跑，得到：
@@ -147,22 +170,22 @@ CUDA error: no kernel image is available for execution on the device
 
 1. **找到 .so**：定位包含这个 kernel 的共享库。
 2. **查看 fatbin**：`cuobjdump --list-elf libfoo.so | grep arch`。输出：
-   ```
-   arch = sm_90
-   arch = sm_100a
-   ```
-   没有 `sm_120` 的 cubin → 这就是加载失败的原因。
+  ```
+  arch = sm_90
+  arch = sm_100a
+  ```
+  没有 `sm_120` 的 cubin → 这就是加载失败的原因。
 3. **检查有没有 PTX 回退**：`cuobjdump --dump-ptx libfoo.so | head`。如果有 PTX，看它的目标：
-   ```
-   .version 8.7
-   .target sm_100a
-   ```
-   目标是 `sm_100a` → JIT 到 `sm_120` 同样会失败（1x 家族里的不同大版本分支）。
+  ```
+  .version 8.7
+  .target sm_100a
+  ```
+  目标是 `sm_100a` → JIT 到 `sm_120` 同样会失败（1x 家族里的不同大版本分支）。
 4. **读 PTX**：搜 `tcgen05`。如果有：
-   ```
-   tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%r5], 128;
-   ```
-   确认了：这个 kernel 用了数据中心专属指令。没有任何自动回退。
+  ```
+  tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%r5], 128;
+  ```
+  确认了：这个 kernel 用了数据中心专属指令。没有任何自动回退。
 
 到这一步，解决办法只有：
 
@@ -177,20 +200,20 @@ CUDA error: no kernel image is available for execution on the device
 想弄清楚发生了什么，最有用的几个 nvcc 选项：
 
 ```bash
-nvcc -keep -keep-dir build/intermediate ...   # 保留中间文件
-nvcc --ptxas-options=-v ...                   # ptxas 详细输出：SMEM/寄存器用量
-nvcc --resource-usage ...                     # 打印每个 kernel 的寄存器/SMEM 用量
-nvcc -G ...                                   # 生成 device 侧调试信息
-nvcc -lineinfo ...                            # SASS 里带源码行号信息（给 ncu 用）
+nvcc -keep -keep-dir build/intermediate ...  # 保留中间文件
+nvcc --ptxas-options=-v ...          # ptxas 详细输出：SMEM/寄存器用量
+nvcc --resource-usage ...           # 打印每个 kernel 的寄存器/SMEM 用量
+nvcc -G ...                  # 生成 device 侧调试信息
+nvcc -lineinfo ...              # SASS 里带源码行号信息（给 ncu 用）
 ```
 
 查看编译产物：
 
 ```bash
-cuobjdump --list-elf libfoo.so                # 这个 fatbin 里有哪些架构
-cuobjdump --dump-elf libfoo.so > sass.txt     # 导出 SASS
-cuobjdump --dump-ptx libfoo.so > ptx.txt      # 导出 PTX
-nvdisasm sass.txt                              # 反汇编 SASS
+cuobjdump --list-elf libfoo.so        # 这个 fatbin 里有哪些架构
+cuobjdump --dump-elf libfoo.so > sass.txt   # 导出 SASS
+cuobjdump --dump-ptx libfoo.so > ptx.txt   # 导出 PTX
+nvdisasm sass.txt               # 反汇编 SASS
 ```
 
 ## 自测
@@ -208,5 +231,5 @@ nvdisasm sass.txt                              # 反汇编 SASS
 - [`tensor-cores`](tensor-cores.md)——`mma.sync` 和 `tcgen05.mma` 到底是什么
 - [`blackwell/sm100-vs-sm120`](../blackwell/sm100-vs-sm120.md)——PTX 和 SASS 层面的具体差异
 - [`compatibility/translating-tcgen05`](../compatibility/translating-tcgen05.md)——怎么把 SM100 的 PTX 降级成 SM120 的 PTX
-- NVIDIA *PTX ISA* 规范（截至 2026 年为 8.5）
+- NVIDIA *PTX ISA* 规范（截至 2026 年 9 月为 9.3；原文写 8.5）
 - NVIDIA *CUDA Binary Utilities* 文档
